@@ -25,6 +25,22 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 
 	fmt.Printf("Schedule: %v %v tasks (%d I/Os)\n", ntasks, phase, n_other)
 
+    method := string("Worker.DoTask")
+    taskIdx := int(0)
+    var args DoTaskArgs
+    args.JobName = jobName
+    args.Phase = phase
+    args.Tasknumber = ntasks
+    args.NumOtherPhase = n_other
+    for i := 0; i < ntasks; i++ {
+        args.TaskNumber = taskIdx++
+        if phase == mapPhase {
+            args.File = mapFiles[i]
+        } else {
+            args.File = ""
+        }
+        // spawn a chan for each worker, and attach to go routines here
+    }
 	// All ntasks tasks have to be scheduled on workers, and only once all of
 	// them have been completed successfully should the function return.
 	// Remember that workers may fail, and that any given worker may finish

@@ -4,11 +4,11 @@ import (
 	"hash/fnv"
     "fmt"
     "os"
-    "ioutils"
-    "json"
+    "io/ioutil"
+    "encoding/json"
 )
 
-func check(e error) {
+func echeck(e error) {
     if e != nil {
         panic(e)
     }
@@ -24,42 +24,6 @@ func doMap(
 	nReduce int, // the number of reduce task that will be run ("R" in the paper)
 	mapF func(file string, contents string) []KeyValue,
 ) {
-    fmt.Println("mapper #%d processing file %s", mapTaskNumber, inFile)
-    content, err := ioutils.ReadFile(inFile)
-    check(err)
-    key_value_pairs := mapF(inFile, content)
-    encoders := make([]*Encoder, 0, nReduce)
-    writers := make([]*File, 0, nReduce)
-    // prepare output encoders for reduce tasks
-    for r := 0; r < nReduce; r++ {
-        w := os.Open(
-                   reduceName(jobName, mapTaskNumber, r),
-                   os.O_RDWR,
-                   0777)
-        writers = append(writers, w)
-        enc := json.NewEncoder(w)
-        encoders = append(encoders, enc)
-    }
-
-    kv_partitions := make([][]KeyValue, nReduce)
-    for i := 0; i < nReduce; i++ {
-        kv_partitions[i] := make([]KeyValue, len(key_value_pairs))
-    }
-
-    for kv := key_value_pairs {
-        hash := ihash(kv.Key) % nReduce
-        kv_partitions[hash] = append(kv_partitions[hash], kv)
-    }
-
-    for r := 0; r < nReduce; r++ {
-        for kv := kv_partitions[r] {
-            encoders[i].Encode(&kv)
-        }
-    }
-
-    for w := range writers {
-        w.Close()
-    }
 	//
 	// You will need to write this function.
 	//
@@ -99,6 +63,54 @@ func doMap(
 	//
 	// Remember to close the file after you have written all the values!
 	//
+    fmt.Fprintf(os.Stderr, "MAPPER %d processing file %s for %d reducers\n", mapTaskNumber, inFile, nReduce)
+    // call mapper function on input
+    content, err := ioutil.ReadFile(inFile)
+    echeck(err)
+    key_value_pairs := mapF(inFile, string(content))
+    encoders := make([]*json.Encoder, 0, nReduce)
+    writers := make([]*os.File, 0, nReduce)
+    // prepare output for reducers
+    for r := 0; r < nReduce; r++ {
+        w, err := os.OpenFile(
+                   reduceName(jobName, mapTaskNumber, r),
+                   os.O_RDWR | os.O_CREATE | os.O_TRUNC,
+                   0777)
+        echeck(err)
+        writers = append(writers, w)
+        enc := json.NewEncoder(w)
+        encoders = append(encoders, enc)
+    }
+    // partition output by key
+    parts := make([][]KeyValue, nReduce)
+    for i := 0; i < nReduce; i++ {
+        parts[i] = make([]KeyValue, 0, len(key_value_pairs) / nReduce * 2)
+    }
+    for _, kv := range key_value_pairs {
+        hash := ihash(kv.Key) % nReduce
+        parts[hash] = append(parts[hash], kv)
+    }
+    for _, part := range parts {
+        fmt.Fprintf(os.Stderr, "got %d key value pairs out of mapF\n", len(part))
+    }
+    // serialize to output files
+    for r := 0; r < nReduce; r++ {
+        for i, kv := range parts[r] {
+            echeck(encoders[r].Encode(&kv))
+            if (i + 1) % 10000 == 0 {
+                fmt.Fprintf(os.Stderr, "Encode()'ed %d key value pairs\n", i)
+            }
+        }
+    }
+    // sync and close output files
+    for _, w := range writers {
+        err = w.Sync()
+        echeck(err)
+        stat, _ := w.Stat()
+        fmt.Fprintf(os.Stderr, "got %d bytes in output file\n", stat.Size())
+        w.Close()
+    }
+
 }
 
 func ihash(s string) int {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"mapreduce"
 	"os"
+    "unicode"
+    "strconv"
 )
 
 //
@@ -14,7 +16,29 @@ import (
 // of key/value pairs.
 //
 func mapF(filename string, contents string) []mapreduce.KeyValue {
-	// TODO: you have to write this function
+    kv_pairs := make([]mapreduce.KeyValue, 0, 11)
+    length := len(contents)
+
+    if length < 1 {
+        return kv_pairs
+    }
+
+    for i := 0; i < length; i++ {
+        if !unicode.IsLetter(rune(contents[i])) {
+            continue
+        }
+        j := i
+        for i < length && unicode.IsLetter(rune(contents[i])) {
+            i++
+        }
+        if i != j {
+            word := contents[j : i]
+            kv_pairs = append(kv_pairs, mapreduce.KeyValue{string(word), ""})
+            //fmt.Fprintf(os.Stderr, "cut %s\n", string(word))
+        }
+    }
+
+    return kv_pairs
 }
 
 //
@@ -23,7 +47,7 @@ func mapF(filename string, contents string) []mapreduce.KeyValue {
 // any map task.
 //
 func reduceF(key string, values []string) string {
-	// TODO: you also have to write this function
+    return strconv.Itoa(len(values))
 }
 
 // Can be run in 3 ways:
