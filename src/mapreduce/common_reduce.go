@@ -19,16 +19,19 @@ func (a ByKey) Swap(l, r int) { a[r], a[l] = a[l], a[r] }
 // (reduceF) for each key, and writes the output to disk.
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
-	reduceTaskNumber int, // which reduce task this is
+	reduceTask int, // which reduce task this is
 	outFile string, // write the output here
 	nMap int, // the number of map tasks that were run ("M" in the paper)
 	reduceF func(key string, values []string) string,
 ) {
 	//
-	// You will need to write this function.
+	// doReduce manages one reduce task: it should read the intermediate
+	// files for the task, sort the intermediate key/value pairs by key,
+	// call the user-defined reduce function (reduceF) for each key, and
+	// write reduceF's output to disk.
 	//
 	// You'll need to read one intermediate file from each map task;
-	// reduceName(jobName, m, reduceTaskNumber) yields the file
+	// reduceName(jobName, m, reduceTask) yields the file
 	// name from map task m.
 	//
 	// Your doMap() encoded the key/value pairs in the intermediate
@@ -56,7 +59,7 @@ func doReduce(
 	// }
 	// file.Close()
 	//
-    fmt.Fprintf(os.Stderr, "REDUCER %d processing %d files into %s\n", reduceTaskNumber, nMap, outFile)
+    fmt.Fprintf(os.Stderr, "REDUCER %d processing %d files into %s\n", reduceTask, nMap, outFile)
     // prepare output encoder
     w, err := os.OpenFile(outFile, os.O_RDWR | os.O_CREATE | os.O_TRUNC, 0777)
     echeck(err)
@@ -67,7 +70,7 @@ func doReduce(
     // parse and sort key-values from input
     kv_pairs := make([]KeyValue, 0, 11)
     for m := 0; m < nMap; m++ {
-        f, err := os.Open(reduceName(jobName, m, reduceTaskNumber))
+        f, err := os.Open(reduceName(jobName, m, reduceTask))
         echeck(err)
         d := json.NewDecoder(f)
         if d == nil {
