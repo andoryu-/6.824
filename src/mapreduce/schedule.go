@@ -55,8 +55,13 @@ type Clients []Client
 func (self *Client) Run() {
     var count int
     for arg := range self.Args {
-        call(self.Addr, "Worker.DoTask", arg, nil)
-        count++
+        ok := call(self.Addr, "Worker.DoTask", arg, nil)
+        if ok {
+            count++
+        } else {
+            self.Args <- arg
+            break
+        }
     }
     self.Done <- count
 }
