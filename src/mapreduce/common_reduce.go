@@ -3,7 +3,6 @@ package mapreduce
 import (
     "os"
     "sort"
-    "fmt"
     "encoding/json"
 )
 
@@ -59,7 +58,7 @@ func doReduce(
 	// }
 	// file.Close()
 	//
-    fmt.Fprintf(os.Stderr, "REDUCER %d processing %d files into %s\n", reduceTask, nMap, outFile)
+    debug("REDUCER %d processing %d files into %s\n", reduceTask, nMap, outFile)
     // prepare output encoder
     w, err := os.OpenFile(outFile, os.O_RDWR | os.O_CREATE | os.O_TRUNC, 0777)
     echeck(err)

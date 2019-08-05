@@ -1,10 +1,7 @@
 package mapreduce
 
-import (
-        "fmt"
-        "os"
-        "time"
-       )
+import "fmt"
+import "time"
 
 //
 // schedule() starts and waits for all tasks in the given phase (mapPhase
@@ -15,113 +12,76 @@ import (
 // suitable for passing to call(). registerChan will yield all
 // existing registered workers (if any) and new ones as they register.
 //
+// All ntasks tasks have to be scheduled on workers. Once all tasks
+// have completed successfully, schedule() should return.
 func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, registerChan chan string) {
 	var ntasks int
 	var n_other int // number of inputs (for reduce) or outputs (for map)
+    var files_map *[]string
+
 	switch phase {
 	case mapPhase:
 		ntasks = len(mapFiles)
 		n_other = nReduce
+        files_map = &mapFiles
 	case reducePhase:
 		ntasks = nReduce
 		n_other = len(mapFiles)
+        alt := make([]string, ntasks)
+        files_map = &alt
 	}
 
-    // start workers
-    var workers Clients = make([]Client, 0, 1)
-    choice := make(chan int)
-    stop := make(chan bool)
-    go workers.Poller(registerChan, choice, stop)
-    <-choice
 	fmt.Printf("Schedule: %v %v tasks (%d I/Os)\n", ntasks, phase, n_other)
 
-	// All ntasks tasks have to be scheduled on workers. Once all tasks
-	// have completed successfully, schedule() should return.
-	//
-	// Your code here (Part III, Part IV).
-	//
-    length := len(workers)
-    if ntasks < length {
-        length = ntasks
+    var workers Clients = make([]Client, 0, 1)
+    args := make(chan DoTaskArgs)
+    cntl := make(chan int)
+    go workers.Poller(registerChan, args, cntl)
+    for taskIdx := 0; taskIdx < ntasks; taskIdx++ {
+        args <- DoTaskArgs{jobName, (*files_map)[taskIdx], phase, taskIdx, n_other}
     }
-    method := string("Worker.DoTask")
-    taskIdx := int(0)
-    var args DoTaskArgs
-    args.JobName = jobName
-    args.Phase = phase
-    args.NumOtherPhase = n_other
-    for i := 0; i < length; i++ {
-        args.TaskNumber = taskIdx
-        taskIdx++
-        if phase == mapPhase {
-            args.File = mapFiles[i]
-        } else {
-            args.File = ""
-        }
-        // submit to workers inital requests
-        go workers[i].Submit(method, &args)
-    }
-    completion := int(0)
-    for i := length; i < ntasks; i++ {
-        args.TaskNumber = taskIdx
-        taskIdx++
-        if phase == mapPhase {
-            args.File = mapFiles[i]
-        } else {
-            args.File = ""
-        }
-        // more requests for finished workers, also accept incoming workers
-        x := <-choice
-        go workers[x].Submit(method, &args)
-        completion++
-    }
-    for ;completion < ntasks; completion++ {
-        <-choice
-    }
-    stop <- true
+    cntl <- 0
+    <-cntl
 	fmt.Printf("Schedule: %v done\n", phase)
 }
 
 type Client struct {
     Addr string
+    Args chan DoTaskArgs
     Done chan int
 }
 type Clients []Client
 
-func (self *Client) Submit(method string, args *DoTaskArgs) {
-    call(self.Addr, method, *args, nil)
-    self.Done <- 1
+func (self *Client) Run() {
+    var count int
+    for arg := range self.Args {
+        call(self.Addr, "Worker.DoTask", arg, nil)
+        count++
+    }
+    self.Done <- count
 }
 
-func (self *Clients) Poller(incoming chan string, rs chan int, stop chan bool) {
-    for waited := false; len(*self) == 0 || waited == false; {
+func (self *Clients) Poller(incoming chan string, args chan DoTaskArgs, cntl chan int) {
+    done := make(chan int)
+    for finish := false; !finish; {
         select {
-        case <-stop:
-            return
-        case addr := <-incoming:
-            *self = append(*self, Client{addr, make(chan int)})
-        case <-time.After(1 * time.Second):
-            fmt.Fprintf(os.Stderr, "1s elapsed, len %d\n", len(*self))
-            waited = true
-        }
-    }
-    // the first rs here is to notify the completion of the preparation phase
-    rs <- -1
-    for {
-        select {
-        case <-stop:
-            return
-        case addr := <-incoming:
-            *self = append(*self, Client{addr, make(chan int)})
-        default:
-        }
-        for i := 0; i < len(*self); i++ {
-            select {
-            case <-(*self)[i].Done:
-                rs <- i
+            case <-cntl:
+                finish = true
+            case addr := <-incoming:
+                *self = append(*self, Client{addr, args, done})
+                go (*self)[len(*self) - 1].Run()
+            case <-time.After(1 * time.Second):
+                debug("Polling #worker %d\n", len(*self))
             default:
-            }
         }
     }
+    close(args)
+    var ntasks int
+    for completion := 0; completion < len(*self); completion++ {
+        i := <-done
+        ntasks += i
+    }
+    cntl <- ntasks
+    return
 }
 

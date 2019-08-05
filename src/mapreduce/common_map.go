@@ -2,7 +2,6 @@ package mapreduce
 
 import (
 	"hash/fnv"
-    "fmt"
     "os"
     "io/ioutil"
     "encoding/json"
@@ -58,7 +57,7 @@ func doMap(
 	//
 	// Remember to close the file after you have written all the values!
 	//
-    fmt.Fprintf(os.Stderr, "MAPPER %d processing file %s for %d reducers\n", mapTask, inFile, nReduce)
+    debug("MAPPER %d processing file %s for %d reducers\n", mapTask, inFile, nReduce)
     // call mapper function on input
     content, err := ioutil.ReadFile(inFile)
     echeck(err)
@@ -85,20 +84,20 @@ func doMap(
         hash := ihash(kv.Key) % nReduce
         parts[hash] = append(parts[hash], kv)
     }
-    //for _, part := range parts { fmt.Fprintf(os.Stderr, "got %d key value pairs out of mapF\n", len(part)) }
+    //for _, part := range parts { debug("got %d key value pairs out of mapF\n", len(part)) }
 
     // serialize to output
     for r := 0; r < nReduce; r++ {
         for i, kv := range parts[r] {
             echeck(encoders[r].Encode(&kv))
-            if (i + 1) % 10000 == 0 { /*fmt.Fprintf(os.Stderr, "Encode()'ed %d key value pairs\n", i)*/ }
+            if (i + 1) % 10000 == 0 { /*debug("Encode()'ed %d key value pairs\n", i)*/ }
         }
     }
     // sync and close output files
     for _, w := range writers {
         err = w.Sync()
         echeck(err)
-        //stat, _ := w.Stat(); fmt.Fprintf(os.Stderr, "got %d bytes in output file\n", stat.Size())
+        //stat, _ := w.Stat(); debug("got %d bytes in output file\n", stat.Size())
         w.Close()
     }
 }
