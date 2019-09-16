@@ -586,6 +586,7 @@ func (rf *Raft) Run() {
 				log.Printf("ignore staled heartbeat timeout: not leader")
 			} else {
 				// TODO send heartbeat
+				// TODO separate heartbeat for each peer
 				rf.timer_.Reset(time.Duration(100) * time.Millisecond)
 			}
 		} else if e.Type == kRequestVoteDone {
