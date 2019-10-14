@@ -26,6 +26,7 @@ func TestInitialElection2A(t *testing.T) {
 
 	cfg.begin("Test (2A): initial election")
 
+	fmt.Printf("Info: check one leader the 1st time")
 	// is a leader elected?
 	cfg.checkOneLeader()
 
@@ -57,27 +58,38 @@ func TestReElection2A(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
+	fmt.Println("TestReElection2A about to disconnect")
 	cfg.disconnect(leader1)
+	fmt.Println("TestReElection2A check after disconnect")
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
+	fmt.Println("TestReElection2A about to connect")
 	cfg.connect(leader1)
+	fmt.Println("TestReElection2A check after connect")
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
+	fmt.Println("TestReElection2A disconnect leader2")
 	cfg.disconnect(leader2)
+	fmt.Println("TestReElection2A disconnect leader2+1")
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
+	fmt.Println("TestReElection2A about to check no leader")
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
+	fmt.Println("TestReElection2A connect leader2+1")
 	cfg.connect((leader2 + 1) % servers)
+	fmt.Println("TestReElection2A check after connect leader2+1")
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
+	fmt.Println("TestReElection2A about to connect leader2")
 	cfg.connect(leader2)
+	fmt.Println("TestReElection2A check after leader2")
 	cfg.checkOneLeader()
 
 	cfg.end()
