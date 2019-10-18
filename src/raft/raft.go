@@ -21,13 +21,14 @@ import "sync"
 import "labrpc"
 import "time"
 import "math/rand"
+
 //import "fmt"
 import "log"
 import "runtime"
 import "sync/atomic"
 
-// import "bytes"
-// import "labgob"
+import "bytes"
+import "labgob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -154,6 +155,15 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	log.Printf("[%d] Raft.persist() term %d votedFor %d len(logs) %d committed %d", rf.me, rf.current_term_, rf.voted_for_, len(rf.data_), rf.commit_index_)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.current_term_)
+	e.Encode(rf.voted_for_)
+	e.Encode(rf.data_)
+	e.Encode(rf.commit_index_)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -176,6 +186,27 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var voted_for int
+	var logs []LogEntry
+	var committed int
+	if d.Decode(&term) != nil {
+		log.Fatal("decode term error")
+	} else if d.Decode(&voted_for) != nil {
+		log.Fatal("decode voted_for error")
+	} else if d.Decode(&logs) != nil {
+		log.Fatal("decode logs error")
+	} else if d.Decode(&committed) != nil {
+		log.Fatal("decode committed error")
+	} else {
+		rf.current_term_ = term
+		rf.voted_for_ = voted_for
+		rf.data_ = logs
+		rf.commit_index_ = committed
+	}
+	log.Printf("[%d] Raft.readPersist() term %d votedFor %d len(logs) %d committed %d", rf.me, rf.current_term_, rf.voted_for_, len(rf.data_), rf.commit_index_)
 	return
 }
 
@@ -234,25 +265,21 @@ func (rf *Raft) refreshHeartbeatTimeout(server int, ts int) {
 	if !rf.is_leader_ {
 		return
 	}
-	timeout := time.Duration(0)
-	if ts < 0 {
+	var timeout time.Duration
+	if ts <= 0 {
 		timeout = getHeartbeatTimeout()
-	} else if ts > 0 {
+	} else {
 		timeout = time.Duration(ts) * time.Millisecond
 	}
 	r := &rf.replicators_[server]
 	log.Printf("[%d] refresh HeartbeatTimeout term=%d timeout=%v server=%d timer=%p", rf.me, rf.current_term_, timeout, server, r.timer_)
-	if ts == 0 {
-		rf.Notify(&Event{kHeartbeatTimeout, rf.current_term_, server})
-	} else {
-		r.timer_.DelayFor(timeout, func(args ...interface{}) {
-			arg := args2Slice(args...)
-			term := arg[0].(int)
-			s := arg[1].(int)
-			e := &Event{kHeartbeatTimeout, term, s}
-			rf.Notify(e)
-		}, rf.current_term_, server)
-	}
+	r.timer_.DelayFor(timeout, func(args ...interface{}) {
+		arg := args2Slice(args...)
+		term := arg[0].(int)
+		s := arg[1].(int)
+		e := &Event{kHeartbeatTimeout, term, s}
+		rf.Notify(e)
+	}, rf.current_term_, server)
 }
 
 type RequestVoteArgs struct {
@@ -275,11 +302,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+    var need_persist bool
 	reply.GrpIdx = rf.me
 	if args.Term > rf.current_term_ {
-		rf.current_term_ = args.Term
+		rf.current_term_ = args.Term // FIXME persist when term change
 		rf.voted_for_ = -1
 		rf.stepDown()
+        need_persist = true
 	}
 	reply.Term = rf.current_term_
 
@@ -301,6 +330,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.LeaderIdx = rf.voted_for_
 		log.Printf("[%d] RequestVote() reply{Term:%d,Approve:%v,LeaderIdx:%d", rf.me, reply.Term, reply.Approve, reply.LeaderIdx)
 	}
+    if need_persist {
+		rf.persist()
+    }
 	return
 }
 
@@ -338,13 +370,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.Term > rf.current_term_ {
-		rf.current_term_ = args.Term
+		rf.current_term_ = args.Term // FIXME persist when term changed
 		rf.voted_for_ = -1
 		reply.Term = args.Term
 		reply.LeaderIdx = rf.voted_for_
 		if !rf.stepDown() {
-            rf.refreshElectionTimeout()
-        }
+			rf.refreshElectionTimeout()
+		}
+		rf.persist()
 	} else {
 		rf.refreshElectionTimeout()
 	}
@@ -358,42 +391,61 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// check for conflict at PrevLog
 	if args.PrevLog.Index >= 0 && rf.data_[args.PrevLog.Index].Term != args.PrevLog.Term {
-		rf.data_ = rf.data_[:args.PrevLog.Index]
 		reply.Success = false
-		reply.LastLog = rf.logsDescriptor()
-        return
+        conflict_term := rf.data_[args.PrevLog.Index].Term
+        conflict_start_index := args.PrevLog.Index
+        for i := args.PrevLog.Index - 1; i >= 0; i-- {
+            if rf.data_[i].Term == conflict_term {
+                conflict_start_index = i
+            } else {
+                break
+            }
+        }
+		rf.data_ = rf.data_[:args.PrevLog.Index]
+        reply.LastLog.Index = conflict_start_index - 1
+        if reply.LastLog.Index >= 0 {
+            reply.LastLog.Term = rf.data_[reply.LastLog.Index].Term
+        } else {
+            reply.LastLog.Term = 0
+        }
+		return
 	}
-	// check for conflict at Entries
-	end := len(rf.data_)
-	if end > args.PrevLog.Index+1+len(args.Entries) {
-		end = args.PrevLog.Index + 1 + len(args.Entries)
-	}
-	for i := args.PrevLog.Index + 1; i < end; i++ {
+	// overwrite logs with Entries, with guard agains term conflict
+	for i := args.PrevLog.Index + 1; i < len(rf.data_) && i < args.PrevLog.Index + 1 + len(args.Entries); i++ {
 		if rf.data_[i].Term != args.Entries[i-args.PrevLog.Index-1].Term {
 			rf.data_ = rf.data_[0:i]
 			break
 		}
+        rf.data_[i] = args.Entries[i-args.PrevLog.Index-1]
 	}
 	// append any new entries
 	if args.PrevLog.Index+len(args.Entries) > len(rf.data_)-1 {
 		start := len(rf.data_) - args.PrevLog.Index - 1
 		rf.data_ = append(rf.data_, args.Entries[start:]...)
 	}
-
+    // FIXME LastLog must be carefully calculated in order to pass TestFigure8Unreliable2C
 	reply.LastLog = rf.logsDescriptor()
-    if reply.LastLog.Index > args.PrevLog.Index + len(args.Entries) {
-        log.Printf("[%d] len(logs) %d > requestEnd %d", rf.me, len(rf.data_), args.PrevLog.Index+1+len(args.Entries))
-        reply.LastLog.Index = args.PrevLog.Index + len(args.Entries)
-        reply.LastLog.Term = rf.data_[reply.LastLog.Index].Term
-    }
-
-    if rf.commit_index_ < args.LeaderCommit {
-        log.Printf("[%d] Apply index (%d, %d] according to leader %d", rf.me, rf.commit_index_, args.LeaderCommit, args.GrpIdx)
-    }
+	if reply.LastLog.Index > args.PrevLog.Index+len(args.Entries) {
+		log.Printf("[%d] len(logs) %d > requestEnd %d", rf.me, len(rf.data_), args.PrevLog.Index+1+len(args.Entries))
+		reply.LastLog.Index = args.PrevLog.Index + len(args.Entries)
+        if reply.LastLog.Index >= 0 {
+            reply.LastLog.Term = rf.data_[reply.LastLog.Index].Term
+        } else {
+            reply.LastLog.Term = 0
+        }
+	}
+	end := args.LeaderCommit
+	if end > reply.LastLog.Index {
+		end = reply.LastLog.Index
+	}
 	// commit entries
-	for i := rf.commit_index_ + 1; i <= args.LeaderCommit && i < len(rf.data_); i++ {
-		rf.commit_index_ = i
+	for i := rf.commit_index_ + 1; i <= end; i++ {
 		rf.apply_chan_ <- ApplyMsg{true, rf.data_[i].Command, i + 1} // according to raft paper, the first index is 1 not 0
+	}
+	if rf.commit_index_ < end {
+		log.Printf("[%d] Apply index (%d, %d] according to leader %d", rf.me, rf.commit_index_, end, args.GrpIdx)
+		rf.commit_index_ = end
+		rf.persist()
 	}
 	return
 }
@@ -432,7 +484,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	var reply RequestVoteReply
 	ok := rf.peers[server].Call(kMethod, args, &reply)
 	if !ok {
-        log.Printf("[%d] rpc %s() to peer %d %v error", rf.me, kMethod, server, rf.peers[server])
+		log.Printf("[%d] rpc %s() to peer %d %v error", rf.me, kMethod, server, rf.peers[server])
 	} else {
 		rf.Notify(&Event{kRequestVoteDone, *args, reply})
 	}
@@ -470,7 +522,7 @@ func (rf *Raft) IssueAppendEntries(server int) bool {
 		rf.replicators_[server].ack_time_ = time.Now()
 		rf.Notify(&Event{kAppendEntriesDone, args, reply})
 	} else {
-        log.Printf("[%d] rpc %s() to peer %d %v error", rf.me, kMethod, server, rf.peers[server])
+		log.Printf("[%d] rpc %s() to peer %d %v error", rf.me, kMethod, server, rf.peers[server])
 		rf.refreshHeartbeatTimeout(server, 10)
 	}
 
@@ -511,6 +563,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// also update replicators[me] here
 	rf.replicators_[rf.me].MatchIndex = index
 	rf.replicators_[rf.me].NextIndex = index + 1
+	for i := 0; i < len(rf.replicators_); i++ {
+		if i != rf.me {
+			rf.refreshHeartbeatTimeout(i, 1)
+		}
+	}
 	return index + 1, term, isleader // according to raft paper, the first index is 1 not 0
 }
 
@@ -581,11 +638,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start election timer
 	rf.timer_ = &TimedClosure{}
 	rf.refreshElectionTimeout()
+	rf.ballot = make(map[int]bool)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	rf.ballot = make(map[int]bool)
 	log.Printf("Make(peers=%v,me=%d) done, about to run", peers, rf.me)
+
 	// start event loop
 	go rf.Run()
 
@@ -617,7 +675,7 @@ func (rf *Raft) stepDown() bool {
 		for i := 0; i < len(rf.replicators_); i++ {
 			rf.replicators_[i].timer_.Stop()
 		}
-        return true
+		return true
 	}
 	return false
 }
@@ -638,8 +696,9 @@ func (rf *Raft) Run() {
 				log.Printf("[%d] vote for self term=%d current term=%d", rf.me, term, rf.current_term_)
 				rf.current_term_ += 1
 				rf.voted_for_ = rf.me
-				args := RequestVoteArgs{rf.current_term_, rf.voted_for_, rf.logsDescriptor()}
-				rf.IssueRequestVote(&args)
+				rf.persist()
+				args := &RequestVoteArgs{rf.current_term_, rf.voted_for_, rf.logsDescriptor()}
+				rf.IssueRequestVote(args)
 			}
 			rf.mu.Unlock()
 		case kRequestVoteDone:
@@ -658,6 +717,7 @@ func (rf *Raft) Run() {
 					rf.current_term_ = reply.Term
 					rf.voted_for_ = -1
 					rf.stepDown()
+					rf.persist()
 				} else {
 					for _, pro := range rf.ballot {
 						if pro {
@@ -715,8 +775,9 @@ func (rf *Raft) Run() {
 			if reply.Term > rf.current_term_ {
 				log.Printf("[%d] step down receiving AppendEntries reply: term=%d currentTerm=%d", rf.me, reply.Term, rf.current_term_)
 				rf.current_term_ = reply.Term
-				rf.voted_for_ = -1 // FIXME wait for leader's AppendEntries?
+				rf.voted_for_ = -1
 				rf.stepDown()
+				rf.persist()
 			}
 			if !rf.is_leader_ {
 				rf.mu.Unlock()
@@ -727,39 +788,19 @@ func (rf *Raft) Run() {
 			r.NextIndex = reply.LastLog.Index + 1
 			if reply.Success {
 				r.MatchIndex = reply.LastLog.Index
-				least_match := rf.replicators_[0].MatchIndex
-				max_match := rf.replicators_[0].MatchIndex
-				for i := 1; i < len(rf.replicators_); i++ {
-					if rf.replicators_[i].MatchIndex < least_match {
-						least_match = rf.replicators_[i].MatchIndex
-					}
-					if rf.replicators_[i].MatchIndex > max_match {
-						max_match = rf.replicators_[i].MatchIndex
-					}
-				}
-                end := least_match
-                if end > rf.commit_index_ {
-                    end = rf.commit_index_
-                }
-                if end < 0 {
-                    end = 0
-                }
+                min, max := rf.matchRange()
 				// NOTE replicators_[me] also taken into account
-				for i := max_match; i >= end; i-- {
-					vote := 0
-					for j := 0; j < len(rf.replicators_); j++ {
-						if rf.replicators_[j].MatchIndex >= i {
-							vote++
-						}
-					}
+				for i := max; i >= min; i-- {
+					vote := rf.logReplicas(i)
 					if vote > len(rf.replicators_)-vote && rf.data_[i].Term == rf.current_term_ {
-                        if rf.commit_index_ < i {
-                            log.Printf("[%d] Apply index (%d, %d] as leader pro %d con %d", rf.me, rf.commit_index_, i, vote, len(rf.replicators_)-vote)
-                        }
-                        for j := rf.commit_index_ + 1; j <= i; j++ {
-                            rf.commit_index_ = j
-                            rf.apply_chan_ <- ApplyMsg{true, rf.data_[j].Command, j + 1} // according to raft paper, the first index is 1 not 0
-                        }
+						for j := rf.commit_index_ + 1; j <= i; j++ {
+							rf.apply_chan_ <- ApplyMsg{true, rf.data_[j].Command, j + 1} // according to raft paper, the first index is 1 not 0
+						}
+						if rf.commit_index_ < i {
+							log.Printf("[%d] Apply index (%d, %d] as leader pro %d con %d", rf.me, rf.commit_index_, i, vote, len(rf.replicators_)-vote)
+							rf.commit_index_ = i
+							rf.persist()
+						}
 						break
 					}
 				}
@@ -770,6 +811,35 @@ func (rf *Raft) Run() {
 	return
 }
 
+func (rf *Raft) logReplicas(i int) (vote int) {
+    for j := 0; j < len(rf.replicators_); j++ {
+        if rf.replicators_[j].MatchIndex >= i {
+            vote++
+        }
+    }
+    return
+}
+func (rf *Raft) matchRange() (least_match, max_match int) {
+    least_match = rf.replicators_[0].MatchIndex
+    max_match = rf.replicators_[0].MatchIndex
+    for i := 1; i < len(rf.replicators_); i++ {
+        if rf.replicators_[i].MatchIndex < least_match {
+            least_match = rf.replicators_[i].MatchIndex
+        }
+        if rf.replicators_[i].MatchIndex > max_match {
+            max_match = rf.replicators_[i].MatchIndex
+        }
+    }
+    end := least_match
+    if end > rf.commit_index_ {
+        end = rf.commit_index_
+    }
+    if end < 0 {
+        end = 0
+    }
+    least_match = end
+    return
+}
 func (ld *LogEntryDescriptor) Compare(other *LogEntryDescriptor) int {
 	cmp := ld.Term - other.Term
 	if cmp != 0 {
@@ -779,7 +849,7 @@ func (ld *LogEntryDescriptor) Compare(other *LogEntryDescriptor) int {
 }
 
 func getExpireTimeout() time.Duration {
-	timeout := 400
+	timeout := 360
 	return time.Millisecond * time.Duration(timeout)
 }
 func getElectionTimeout() time.Duration {
