@@ -290,10 +290,9 @@ type RequestVoteArgs struct {
 }
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term      int
-	GrpIdx    int
-	Approve   bool
-	LeaderIdx int
+	Term    int
+	GrpIdx  int
+	Approve bool
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -302,13 +301,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-    var need_persist bool
+	var need_persist bool
 	reply.GrpIdx = rf.me
 	if args.Term > rf.current_term_ {
-		rf.current_term_ = args.Term // FIXME persist when term change
+		rf.current_term_ = args.Term // persist when term change
 		rf.voted_for_ = -1
 		rf.stepDown()
-        need_persist = true
+		need_persist = true
 	}
 	reply.Term = rf.current_term_
 
@@ -323,16 +322,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if reply.Approve {
 		rf.voted_for_ = args.GrpIdx
-		reply.LeaderIdx = rf.voted_for_
-		log.Printf("[%d] RequestVote() reply{Term:%d,Approve:%v,LeaderIdx:%d", rf.me, reply.Term, reply.Approve, reply.LeaderIdx)
+		log.Printf("[%d] RequestVote() reply{Term:%d,Approve:%v} VotedFor:%d", rf.me, reply.Term, reply.Approve, rf.voted_for_)
 		rf.refreshElectionTimeout()
 	} else {
-		reply.LeaderIdx = rf.voted_for_
-		log.Printf("[%d] RequestVote() reply{Term:%d,Approve:%v,LeaderIdx:%d", rf.me, reply.Term, reply.Approve, reply.LeaderIdx)
+		log.Printf("[%d] RequestVote() reply{Term:%d,Approve:%v} VotedFor:%d", rf.me, reply.Term, reply.Approve, rf.voted_for_)
 	}
-    if need_persist {
+	if need_persist {
 		rf.persist()
-    }
+	}
 	return
 }
 
@@ -343,12 +340,12 @@ type AppendEntriesArgs struct {
 	Entries      []LogEntry
 	LeaderCommit int
 }
-type AppendEntriesReply struct {
-	Term      int
-	Success   bool
-	LastLog   LogEntryDescriptor
-	GrpIdx    int
-	LeaderIdx int
+type AppendEntriesReply struct { // FIXME TODO implement ConflictIndex & ConflictTerm
+	Term          int
+	Success       bool
+	GrpIdx        int
+	ConflictTerm int
+	ConflictIndex int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -360,83 +357,70 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.current_term_
 	reply.Success = true
 	reply.GrpIdx = rf.me
-	reply.LeaderIdx = rf.voted_for_
 
 	if args.Term < rf.current_term_ {
-		reply.Term = rf.current_term_
-		reply.Success = false
-		reply.LastLog = rf.logsDescriptor()
+		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, -1, -1
 		return
 	}
 
+    var need_persist bool
 	if args.Term > rf.current_term_ {
-		rf.current_term_ = args.Term // FIXME persist when term changed
+		rf.current_term_ = args.Term // persist when term changed
 		rf.voted_for_ = -1
 		reply.Term = args.Term
-		reply.LeaderIdx = rf.voted_for_
 		if !rf.stepDown() {
 			rf.refreshElectionTimeout()
 		}
-		rf.persist()
+        if !need_persist {
+            need_persist = true
+            defer rf.persist()
+        }
 	} else {
 		rf.refreshElectionTimeout()
 	}
 
 	// check for gap
 	if args.PrevLog.Index >= len(rf.data_) {
-		reply.Success = false
-		reply.LastLog = rf.logsDescriptor()
+		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, 0, len(rf.data_)
 		return
 	}
 
 	// check for conflict at PrevLog
 	if args.PrevLog.Index >= 0 && rf.data_[args.PrevLog.Index].Term != args.PrevLog.Term {
-		reply.Success = false
-        conflict_term := rf.data_[args.PrevLog.Index].Term
-        conflict_start_index := args.PrevLog.Index
-        for i := args.PrevLog.Index - 1; i >= 0; i-- {
-            if rf.data_[i].Term == conflict_term {
-                conflict_start_index = i
-            } else {
-                break
-            }
-        }
+		conflict_term := rf.data_[args.PrevLog.Index].Term
+		conflict_start_index := args.PrevLog.Index
+		for i := args.PrevLog.Index - 1; i >= 0; i-- {
+			if rf.data_[i].Term == conflict_term {
+				conflict_start_index = i
+			} else {
+				break
+			}
+		}
 		rf.data_ = rf.data_[:args.PrevLog.Index]
-        reply.LastLog.Index = conflict_start_index - 1
-        if reply.LastLog.Index >= 0 {
-            reply.LastLog.Term = rf.data_[reply.LastLog.Index].Term
-        } else {
-            reply.LastLog.Term = 0
-        }
+        reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, conflict_term, conflict_start_index
 		return
 	}
-	// overwrite logs with Entries, with guard agains term conflict
-	for i := args.PrevLog.Index + 1; i < len(rf.data_) && i < args.PrevLog.Index + 1 + len(args.Entries); i++ {
-		if rf.data_[i].Term != args.Entries[i-args.PrevLog.Index-1].Term {
-			rf.data_ = rf.data_[0:i]
-			break
-		}
-        rf.data_[i] = args.Entries[i-args.PrevLog.Index-1]
+	// NOTE overwrite logs with Entries
+	for i := args.PrevLog.Index + 1; i < len(rf.data_) && i < args.PrevLog.Index+1+len(args.Entries); i++ {
+		//if rf.data_[i].Term != args.Entries[i-args.PrevLog.Index-1].Term {
+		//	rf.data_ = rf.data_[0:i]
+		//	break
+		//}
+		rf.data_[i] = args.Entries[i-args.PrevLog.Index-1]
 	}
 	// append any new entries
 	if args.PrevLog.Index+len(args.Entries) > len(rf.data_)-1 {
 		start := len(rf.data_) - args.PrevLog.Index - 1
 		rf.data_ = append(rf.data_, args.Entries[start:]...)
 	}
-    // FIXME LastLog must be carefully calculated in order to pass TestFigure8Unreliable2C
-	reply.LastLog = rf.logsDescriptor()
-	if reply.LastLog.Index > args.PrevLog.Index+len(args.Entries) {
+    reply.Success, reply.ConflictTerm, reply.ConflictIndex = true, 0, len(rf.data_)
+	if len(rf.data_) > args.PrevLog.Index+1+len(args.Entries) {
 		log.Printf("[%d] len(logs) %d > requestEnd %d", rf.me, len(rf.data_), args.PrevLog.Index+1+len(args.Entries))
-		reply.LastLog.Index = args.PrevLog.Index + len(args.Entries)
-        if reply.LastLog.Index >= 0 {
-            reply.LastLog.Term = rf.data_[reply.LastLog.Index].Term
-        } else {
-            reply.LastLog.Term = 0
-        }
+		reply.ConflictIndex = args.PrevLog.Index + 1 + len(args.Entries)
 	}
 	end := args.LeaderCommit
-	if end > reply.LastLog.Index {
-		end = reply.LastLog.Index
+	if end > len(rf.data_) - 1 {
+		end = len(rf.data_) - 1
 	}
 	// commit entries
 	for i := rf.commit_index_ + 1; i <= end; i++ {
@@ -445,7 +429,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.commit_index_ < end {
 		log.Printf("[%d] Apply index (%d, %d] according to leader %d", rf.me, rf.commit_index_, end, args.GrpIdx)
 		rf.commit_index_ = end
-		rf.persist()
+        if !need_persist {
+            need_persist = true
+            defer rf.persist()
+        }
 	}
 	return
 }
@@ -526,7 +513,7 @@ func (rf *Raft) IssueAppendEntries(server int) bool {
 		rf.refreshHeartbeatTimeout(server, 10)
 	}
 
-	log.Printf("[%d] IssueAppendEntries(%d)={Term:%d, Success:%v, LastLog:%v} ok %v", rf.me, server, reply.Term, reply.Success, reply.LastLog, ok)
+	log.Printf("[%d] IssueAppendEntries(%d)={Term:%d,Success:%v,conflictIndex:%d,conflictTerm:%d} ok %v", rf.me, server, reply.Term, reply.Success, reply.ConflictIndex, reply.ConflictTerm, ok)
 	return ok
 }
 
@@ -785,10 +772,9 @@ func (rf *Raft) Run() {
 			}
 			rf.refreshHeartbeatTimeout(server, -1)
 			r := &rf.replicators_[server]
-			r.NextIndex = reply.LastLog.Index + 1
 			if reply.Success {
-				r.MatchIndex = reply.LastLog.Index
-                min, max := rf.matchRange()
+                r.NextIndex, r.MatchIndex = reply.ConflictIndex, reply.ConflictIndex - 1
+				min, max := rf.matchRange()
 				// NOTE replicators_[me] also taken into account
 				for i := max; i >= min; i-- {
 					vote := rf.logReplicas(i)
@@ -804,7 +790,23 @@ func (rf *Raft) Run() {
 						break
 					}
 				}
-			}
+            } else if reply.ConflictTerm == -1 && reply.ConflictIndex == -1 {
+                r.NextIndex, r.MatchIndex = len(rf.data_), -1 // FIXME reset ok ???
+			} else {
+                var found bool
+                if reply.ConflictTerm != 0 {
+                    for i := 0; i < len(rf.data_); i++ {
+                        if rf.data_[i].Term == reply.ConflictTerm {
+                            r.NextIndex = i
+                            found = true
+                            break
+                        }
+                    }
+                }
+                if !found {
+                    r.NextIndex = reply.ConflictIndex
+                }
+            }
 			rf.mu.Unlock()
 		}
 	}
@@ -812,33 +814,33 @@ func (rf *Raft) Run() {
 }
 
 func (rf *Raft) logReplicas(i int) (vote int) {
-    for j := 0; j < len(rf.replicators_); j++ {
-        if rf.replicators_[j].MatchIndex >= i {
-            vote++
-        }
-    }
-    return
+	for j := 0; j < len(rf.replicators_); j++ {
+		if rf.replicators_[j].MatchIndex >= i {
+			vote++
+		}
+	}
+	return
 }
 func (rf *Raft) matchRange() (least_match, max_match int) {
-    least_match = rf.replicators_[0].MatchIndex
-    max_match = rf.replicators_[0].MatchIndex
-    for i := 1; i < len(rf.replicators_); i++ {
-        if rf.replicators_[i].MatchIndex < least_match {
-            least_match = rf.replicators_[i].MatchIndex
-        }
-        if rf.replicators_[i].MatchIndex > max_match {
-            max_match = rf.replicators_[i].MatchIndex
-        }
-    }
-    end := least_match
-    if end > rf.commit_index_ {
-        end = rf.commit_index_
-    }
-    if end < 0 {
-        end = 0
-    }
-    least_match = end
-    return
+	least_match = rf.replicators_[0].MatchIndex
+	max_match = rf.replicators_[0].MatchIndex
+	for i := 1; i < len(rf.replicators_); i++ {
+		if rf.replicators_[i].MatchIndex < least_match {
+			least_match = rf.replicators_[i].MatchIndex
+		}
+		if rf.replicators_[i].MatchIndex > max_match {
+			max_match = rf.replicators_[i].MatchIndex
+		}
+	}
+	end := least_match
+	if end > rf.commit_index_ {
+		end = rf.commit_index_
+	}
+	if end < 0 {
+		end = 0
+	}
+	least_match = end
+	return
 }
 func (ld *LogEntryDescriptor) Compare(other *LogEntryDescriptor) int {
 	cmp := ld.Term - other.Term
