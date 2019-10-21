@@ -22,7 +22,7 @@ import "labrpc"
 import "time"
 import "math/rand"
 
-//import "fmt"
+import "fmt"
 import "log"
 import "runtime"
 import "sync/atomic"
@@ -228,7 +228,7 @@ func (rf *Raft) logsDescriptor() LogEntryDescriptor {
 	return ld
 }
 
-func (rf *Raft) Notify(e *Event) {
+func (rf *Raft) spinLock() {
 	for {
 		old := atomic.LoadInt32(&rf.events_flag)
 		if old == 1 {
@@ -239,10 +239,17 @@ func (rf *Raft) Notify(e *Event) {
 			break
 		}
 	}
+}
+func (rf *Raft) spinUnlock() {
+	atomic.StoreInt32(&rf.events_flag, 0)
+}
+
+func (rf *Raft) notify(e *Event) {
+	rf.spinLock()
 	if rf.events_open {
 		rf.events_ <- (*e)
 	}
-	atomic.StoreInt32(&rf.events_flag, 0)
+	rf.spinUnlock()
 }
 
 func (rf *Raft) stopElectionTimeout() {
@@ -263,7 +270,7 @@ func (rf *Raft) refreshElectionTimeout() {
 		term := arg[0].(int)
 		t := arg[1].(time.Time)
 		e := &Event{kElectionTimeout, term, t}
-		rf.Notify(e)
+		rf.notify(e)
 	}, rf.current_term_, time.Now())
 }
 
@@ -284,7 +291,7 @@ func (rf *Raft) refreshHeartbeatTimeout(server int, ts int) {
 		term := arg[0].(int)
 		s := arg[1].(int)
 		e := &Event{kHeartbeatTimeout, term, s}
-		rf.Notify(e)
+		rf.notify(e)
 	}, rf.current_term_, server)
 }
 
@@ -304,19 +311,21 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	log.Printf("[%d] RequestVote() args{Term:%d,GrpIdx:%d,LastLog:{Term:%d,Index:%d}}", rf.me, args.Term, args.GrpIdx, args.LastLog.Term, args.LastLog.Index)
+	voted_for := rf.voted_for_
+	defer func() {
+		log.Printf("[%d] RequestVote() reply{Term:%d,Approve:%v} VotedFor:%d", rf.me, reply.Term, reply.Approve, voted_for)
+	}()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//var need_persist bool
 	reply.GrpIdx = rf.me
 	if args.Term > rf.current_term_ {
 		if rf.is_leader_ {
 			log.Printf("[%d] RequestVote term %d > current term %d step down", rf.me, args.Term, rf.current_term_)
 		}
-		rf.current_term_ = args.Term // persist when term change
+		rf.current_term_ = args.Term // persist when term change?
 		rf.voted_for_ = -1
 		rf.stepDown()
-		//need_persist = true
 	}
 	reply.Term = rf.current_term_
 
@@ -331,14 +340,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if reply.Approve {
 		rf.voted_for_ = args.GrpIdx
-		log.Printf("[%d] RequestVote() reply{Term:%d,Approve:%v} VotedFor:%d", rf.me, reply.Term, reply.Approve, rf.voted_for_)
 		rf.refreshElectionTimeout()
-	} else {
-		log.Printf("[%d] RequestVote() reply{Term:%d,Approve:%v} VotedFor:%d", rf.me, reply.Term, reply.Approve, rf.voted_for_)
 	}
-	//if need_persist {
-	//	rf.persist()
-	//}
+	voted_for = rf.voted_for_
 	return
 }
 
@@ -349,47 +353,40 @@ type AppendEntriesArgs struct {
 	Entries      []LogEntry
 	LeaderCommit int
 }
-type AppendEntriesReply struct { // FIXME TODO implement ConflictIndex & ConflictTerm
+type AppendEntriesReply struct {
 	Term          int
 	Success       bool
 	GrpIdx        int
-	ConflictTerm  int
-	ConflictIndex int
+	ConflictTerm  int // if ConflictTerm != 0, leader find the first index with the same term in its log to update NextIndex
+	ConflictIndex int // if ConflictTerm == 0, leader use ConflictIndex to update NextIndex
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (2A, 2B).
 	log.Printf("[%d] AppendEntries() args{Term:%d,GrpIdx:%d,PrevLog:%v,Entries:%v,LeaderCommit:%d}", rf.me, args.Term, args.GrpIdx, args.PrevLog, args.Entries, args.LeaderCommit)
+	voted_for := rf.voted_for_
 	defer func() {
-		log.Printf("[%d] AppendEntries() reply{Term:%d,Success:%v,conflictIndex:%d,conflictTerm:%d}", rf.me, reply.Term, reply.Success, reply.ConflictIndex, reply.ConflictTerm)
+		log.Printf("[%d] AppendEntries() reply{Term:%d,Success:%v,conflictIndex:%d,conflictTerm:%d} VotedFor %d", rf.me, reply.Term, reply.Success, reply.ConflictIndex, reply.ConflictTerm, voted_for)
 	}()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	reply.Term = rf.current_term_
-	reply.Success = true
-	reply.GrpIdx = rf.me
-
+	reply.Term, reply.Success, reply.GrpIdx = rf.current_term_, true, rf.me
 	if args.Term < rf.current_term_ {
 		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, -1, -1
 		return
 	}
 
-	//var need_persist bool
 	if args.Term > rf.current_term_ {
 		if rf.is_leader_ {
 			log.Printf("[%d] AppendEntries term %d > current term %d step down", rf.me, args.Term, rf.current_term_)
 		}
-		rf.current_term_ = args.Term // persist when term changed
-		rf.voted_for_ = -1
+		rf.current_term_ = args.Term // persist when term changed?
+		rf.voted_for_ = args.GrpIdx
 		reply.Term = args.Term
 		if !rf.stepDown() {
 			rf.refreshElectionTimeout()
 		}
-		//if !need_persist {
-		//	need_persist = true
-		//	defer rf.persist()
-		//}
 	} else {
 		rf.refreshElectionTimeout()
 	}
@@ -399,7 +396,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, 0, len(rf.data_)
 		return
 	}
-
+	voted_for = rf.voted_for_
 	// check for conflict at PrevLog
 	if args.PrevLog.Index >= 0 && rf.data_[args.PrevLog.Index].Term != args.PrevLog.Term {
 		conflict_term := rf.data_[args.PrevLog.Index].Term
@@ -415,18 +412,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, conflict_term, conflict_start_index
 		return
 	}
-	// NOTE overwrite logs with Entries
+	if len(rf.data_) < args.PrevLog.Index+1 {
+		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, 0, len(rf.data_)
+		return
+	}
+	// check for conflict between logs and AppendEntriesArgs.Entries
 	for i := args.PrevLog.Index + 1; i < len(rf.data_) && i < args.PrevLog.Index+1+len(args.Entries); i++ {
 		if rf.data_[i].Term != args.Entries[i-args.PrevLog.Index-1].Term {
 			rf.data_ = rf.data_[:i]
 			break
 		}
-		//rf.data_[i] = args.Entries[i-args.PrevLog.Index-1]
+		//rf.data_[i] = args.Entries[i-args.PrevLog.Index-1] // overwrite logs with Entries
 	}
-    if len(rf.data_) < args.PrevLog.Index + 1 {
-		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, 0, len(rf.data_)
-        return
-    }
 	// append any new entries
 	if args.PrevLog.Index+len(args.Entries) > len(rf.data_)-1 {
 		start := len(rf.data_) - args.PrevLog.Index - 1
@@ -455,10 +452,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log.Printf("[%d] Apply index (%d, %d] according to leader %d", rf.me, rf.commit_index_, end, args.GrpIdx)
 		rf.commit_index_ = end
 		rf.persist()
-		//if !need_persist {
-		//	need_persist = true
-		//	defer rf.persist()
-		//}
 	}
 	return
 }
@@ -499,7 +492,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	if !ok {
 		log.Printf("[%d] rpc %s() to peer %d %v error", rf.me, kMethod, server, rf.peers[server])
 	} else {
-		rf.Notify(&Event{kRequestVoteDone, *args, reply})
+		rf.notify(&Event{kRequestVoteDone, *args, reply})
 	}
 	return ok
 }
@@ -520,21 +513,18 @@ func (rf *Raft) IssueRequestVote(args *RequestVoteArgs) {
 func (rf *Raft) IssueAppendEntries(server int, args *AppendEntriesArgs) bool {
 	const kMethod string = "Raft.AppendEntries"
 	var reply AppendEntriesReply
-    rf.refreshHeartbeatTimeout(server, -1)
 	ok := rf.peers[server].Call(kMethod, args, &reply)
 
 	rf.mu.Lock()
 	if ok {
 		rf.replicators_[server].ack_time_ = time.Now()
-		//rf.refreshHeartbeatTimeout(server, -1)
 	} else {
 		log.Printf("[%d] %p rpc %s() to peer %d %v error", rf.me, rf, kMethod, server, rf.peers[server])
-		//rf.refreshHeartbeatTimeout(server, 10)
 	}
 	rf.mu.Unlock()
 
 	if ok {
-		rf.Notify(&Event{kAppendEntriesDone, *args, reply})
+		rf.notify(&Event{kAppendEntriesDone, *args, reply})
 	}
 	log.Printf("[%d] %p IssueAppendEntries(%d)={Term:%d,Success:%v,conflictIndex:%d,conflictTerm:%d} ok %v", rf.me, rf, server, reply.Term, reply.Success, reply.ConflictIndex, reply.ConflictTerm, ok)
 	return ok
@@ -593,19 +583,10 @@ func (rf *Raft) Kill() {
 	rf.stopElectionTimeout()
 	rf.stopHeartbeatTimeout()
 	time.Sleep(time.Millisecond * time.Duration(10))
-	for {
-		old := atomic.LoadInt32(&rf.events_flag)
-		if old == 1 {
-			runtime.Gosched()
-			continue
-		}
-		if atomic.CompareAndSwapInt32(&rf.events_flag, old, 1) {
-			break
-		}
-	}
+	rf.spinLock()
 	rf.events_open = false
 	close(rf.events_)
-	atomic.StoreInt32(&rf.events_flag, 0)
+	rf.spinUnlock()
 }
 
 //
@@ -652,7 +633,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	log.Printf("Make(peers=%v,me=%d) done, about to run", peers, rf.me)
+	log.Printf("[%d] Raft.Make(peers=%v,me=%d) done, about to run", rf.me, peers, rf.me)
 
 	// start event loop
 	go rf.Run()
@@ -660,9 +641,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) stepUp() {
+func (rf *Raft) stepUp() bool {
 	if rf.is_leader_ {
 		log.Printf("[%d] ignore stale RequestVote approve as leader", rf.me)
+		return false
 	} else {
 		log.Printf("[%d] StepUp as leader", rf.me)
 		rf.is_leader_ = true
@@ -673,8 +655,8 @@ func (rf *Raft) stepUp() {
 			//rf.replicators_[i].MatchIndex = -1
 			rf.refreshHeartbeatTimeout(i, 1)
 		}
+		return true
 	}
-	return
 }
 
 func (rf *Raft) stepDown() bool {
@@ -686,8 +668,9 @@ func (rf *Raft) stepDown() bool {
 			rf.replicators_[i].timer_.Stop()
 		}
 		return true
+	} else {
+		return false
 	}
-	return false
 }
 
 //
@@ -750,6 +733,7 @@ func (rf *Raft) Run() {
 			} else if !rf.is_leader_ {
 				log.Printf("[%d] ignore stale heartbeat timeout: not leader", rf.me)
 			} else if server == rf.me {
+				// we use replicator[me] timer to check whether we should actively step down due to network partition
 				if _, isleader := rf.getState(); !isleader {
 					log.Printf("[%d] unable to connect to quorum, step down. term=%d", rf.me, term)
 					rf.stepDown()
@@ -764,6 +748,7 @@ func (rf *Raft) Run() {
 				}
 				args.Entries = rf.data_[rf.replicators_[server].NextIndex:]
 				log.Printf("[%d] %p IssueAppendEntries(%d) replicator%v len(logs) %d is_hb %v", rf.me, rf, server, rf.replicators_[server], len(rf.data_), len(args.Entries) == 0)
+				rf.refreshHeartbeatTimeout(server, -1)
 				rf.mu.Unlock()
 				go rf.IssueAppendEntries(server, &args)
 				break
@@ -777,7 +762,7 @@ func (rf *Raft) Run() {
 			reply := e.Reply.(AppendEntriesReply)
 			server := reply.GrpIdx
 			if len(rf.replicators_) <= server {
-				panic("empty replicators")
+				panic(fmt.Sprintf("[%d] len(replicators) %d <= server %d", rf.me, len(rf.replicators_), server))
 			}
 			if !rf.is_leader_ {
 				log.Printf("[%d] ignore stale AppendEntries callback as follower", rf.me)
@@ -821,16 +806,15 @@ func (rf *Raft) Run() {
 				}
 				if r.NextIndex < len(rf.data_) {
 					rf.refreshHeartbeatTimeout(server, 10)
-					//} else {
-					//rf.refreshHeartbeatTimeout(server, -1)
 				}
 			} else if reply.ConflictTerm == -1 && reply.ConflictIndex == -1 {
-				r.NextIndex, r.MatchIndex = len(rf.data_), -1 // FIXME reset ok ???
-				//rf.refreshHeartbeatTimeout(server, -1)
+				log.Printf("[%d] AppendEntries error, args term %d reply term %d", rf.me, args.Term, reply.Term)
+				r.NextIndex, r.MatchIndex = len(rf.data_), -1 // reset
 			} else {
 				var found bool
 				if reply.ConflictTerm != 0 {
-					for i := 0; i < len(rf.data_); i++ {
+                    for i := len(rf.data_) - 1; i >= 0; i-- {
+					//for i := 0; i < len(rf.data_); i++ {
 						if rf.data_[i].Term == reply.ConflictTerm {
 							r.NextIndex = i
 							found = true
@@ -858,9 +842,14 @@ func (rf *Raft) logReplicas(i int) (vote int) {
 	return
 }
 func (rf *Raft) matchRange() (least_match, max_match int) {
+	npeers := len(rf.replicators_)
+	if npeers < 1 {
+		least_match, max_match = 0, -1
+		return
+	}
 	least_match = rf.replicators_[0].MatchIndex
 	max_match = rf.replicators_[0].MatchIndex
-	for i := 1; i < len(rf.replicators_); i++ {
+	for i := 1; i < npeers; i++ {
 		if rf.replicators_[i].MatchIndex < least_match {
 			least_match = rf.replicators_[i].MatchIndex
 		}
@@ -869,7 +858,7 @@ func (rf *Raft) matchRange() (least_match, max_match int) {
 		}
 	}
 	end := least_match
-	if end > rf.commit_index_ {
+	if end < rf.commit_index_ {
 		end = rf.commit_index_
 	}
 	if end < 0 {
