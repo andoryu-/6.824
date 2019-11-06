@@ -340,6 +340,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if reply.Approve {
 		rf.voted_for_ = args.GrpIdx
+		defer rf.persist()
 		rf.refreshElectionTimeout()
 	}
 	voted_for = rf.voted_for_
