@@ -3,11 +3,18 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import "math/big"
+import "sync/atomic"
 
+var (
+    _clerkId int32
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+    cidbase uint64
+    rqseq   uint32
+    leaderIdx int
 }
 
 func nrand() int64 {
@@ -17,10 +24,20 @@ func nrand() int64 {
 	return x
 }
 
+func (c *Clerk) newid() uint64 {
+    var n uint64 = atomic.AddUint32(&c.rqseq, 1)
+    return (c.cidbase | n)
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+    var j uint64 = nrand()
+    var i uint64 = atomic.AddInt32(&_clerkId, 1)
+    ck.cidbase = (i + j << 16) << 32
+    atomic.StoreUint32(&ck.rqseq, 0)
+    ck.leaderIdx = -1
 	return ck
 }
 
@@ -39,6 +56,18 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+    cid := ck.newid()
+    args := GetArgs{Key: key, Cid: cid}
+    var reply GetReply
+    for peer := range ck.servers {
+        ok := peer.Call("KVServer.Get", &args, &reply)
+        if ok && !reply.WrongLeader {
+            if reply.Err == OK {
+                return reply.Value
+            }
+            break
+        }
+    }
 	return ""
 }
 
