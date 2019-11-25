@@ -4,17 +4,20 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "sync/atomic"
+import "log"
+import "time"
 
 var (
-    _clerkId int32
+	_clerkId int32
 )
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-    cidbase uint64
-    rqseq   uint32
-    leaderIdx int
+	cidbase   uint64
+	rqseq     uint32
+	leaderIdx int
+	me        int
 }
 
 func nrand() int64 {
@@ -24,20 +27,23 @@ func nrand() int64 {
 	return x
 }
 
-func (c *Clerk) newid() uint64 {
-    var n uint64 = atomic.AddUint32(&c.rqseq, 1)
-    return (c.cidbase | n)
+func (ck *Clerk) newid() uint64 {
+	var n uint64 = uint64(atomic.AddUint32(&ck.rqseq, 1))
+	log.Printf("[%d] newid() cidbase %v cid %v", ck.me, ck.cidbase, ck.cidbase|n)
+	return (ck.cidbase | n)
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-    var j uint64 = nrand()
-    var i uint64 = atomic.AddInt32(&_clerkId, 1)
-    ck.cidbase = (i + j << 16) << 32
-    atomic.StoreUint32(&ck.rqseq, 0)
-    ck.leaderIdx = -1
+	ck.me = int(atomic.AddInt32(&_clerkId, 1))
+	var j uint64 = uint64(nrand())
+	var i uint64 = uint64(ck.me)
+	ck.cidbase = (i + j<<16) << 32
+	atomic.StoreUint32(&ck.rqseq, 0)
+	ck.leaderIdx = 0
+	log.Printf("[%d] MakeClerk(): cidbase %v clerk %v", ck.me, ck.cidbase, ck)
 	return ck
 }
 
@@ -56,18 +62,31 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-    cid := ck.newid()
-    args := GetArgs{Key: key, Cid: cid}
-    var reply GetReply
-    for peer := range ck.servers {
-        ok := peer.Call("KVServer.Get", &args, &reply)
-        if ok && !reply.WrongLeader {
-            if reply.Err == OK {
-                return reply.Value
-            }
-            break
-        }
-    }
+	cid := ck.newid()
+	args := GetArgs{Key: key, Cid: cid}
+	j := 0
+	for i := ck.leaderIdx; i < len(ck.servers); i++ {
+		var reply GetReply
+		log.Printf("[%d] Clerk Call Get %v retry %d", ck.me, key, j)
+		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+		if ok && !reply.WrongLeader { // FIXME if !ok should we retry the same peer or retry another peer?
+			ck.leaderIdx = i
+			if reply.Err == OK {
+				return reply.Value
+			} else if reply.Err != ErrNoKey {
+				log.Printf("[%d] Get() err: %v", ck.me, reply.Err)
+			}
+			return ""
+		}
+		if i == len(ck.servers)-1 {
+			i = -1
+		}
+		j++
+		if j > 100 { // 1s ~= election timeout
+			break
+		}
+		time.Sleep(time.Millisecond * time.Duration(100))
+	}
 	return ""
 }
 
@@ -83,6 +102,31 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	cid := ck.newid()
+	args := PutAppendArgs{Key: key, Value: value, Op: op, Cid: cid}
+	j := 0
+	for i := ck.leaderIdx; i < len(ck.servers); i++ {
+		var reply PutAppendReply
+		log.Printf("[%d] Clerk Call PutAppend %v retry %d", ck.me, key, j)
+		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+		if ok && !reply.WrongLeader { // FIXME if !ok should we retry the same peer or retry another peer?
+			ck.leaderIdx = i
+			if reply.Err == OK {
+				return
+			}
+			log.Printf("[%d] PutAppend() err: %v", ck.me, reply.Err)
+			return
+		}
+		if i == len(ck.servers)-1 {
+			i = -1
+		}
+		j++
+		if j > 100 { // 1s ~= election timeout
+			break
+		}
+		time.Sleep(time.Millisecond * time.Duration(100))
+	}
+	return
 }
 
 func (ck *Clerk) Put(key string, value string) {
