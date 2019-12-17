@@ -206,7 +206,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-	kv.maxraftstate = 100 // FIXME only for testing
 
 	// You may need initialization code here.
 
@@ -221,7 +220,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	kv.leading = false
 	latest_cids := make(map[uint64]uint64)
-	//staged_ := make(map[uint64]interface{})
+
 	if ss := kv.rf.GetSnapshot(); len(ss) > 0 {
 		data_ := make(map[string]string)
 		buf := bytes.NewBuffer(ss)
@@ -240,11 +239,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			break
 		}
 		op := entry.Command.(Op)
-		//log.Printf("[%d] cid %d op %v to apply", kv.me, op.Cid, op)
-		//if _, ok := kv.staged[op.Cid]; ok {
-		//	log.Printf("[%d] cid %d present in staged", kv.me, op.Cid)
-		//	continue
-		//}
 		is_duplicate := false
 		if cid, ok := latest_cids[op.Cid>>32]; ok && op.Cid <= cid {
 			log.Printf("[%d] cid %d present in dedup", kv.me, op.Cid)
@@ -259,17 +253,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			}
 			kv.staged[op.Cid] = PutAppendReply{WrongLeader: false, Err: OK}
 		case kAppend:
-			//if _, ok := kv.data[op.Key]; ok {
-			//	kv.data[op.Key] += op.Value
-			//} else {
-			//	kv.data[op.Key] = op.Value
-			//}
 			if !is_duplicate {
 				kv.data[op.Key] += op.Value
 			}
 			kv.staged[op.Cid] = PutAppendReply{WrongLeader: false, Err: OK}
 		}
-		if cid, ok := latest_cids[op.Cid>>32]; ok && cid < op.Cid {
+		if cid, ok := latest_cids[op.Cid>>32]; !ok {
+			latest_cids[op.Cid>>32] = op.Cid
+		} else if cid < op.Cid {
 			delete(kv.staged, cid)
 			latest_cids[op.Cid>>32] = op.Cid
 		}
@@ -280,19 +271,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 	for msg := range kv.applyCh {
-		if msg.CommandValid {
-			// Get/Put/Append
+		if msg.CommandValid { // Get/Put/Append
 			op, ok := msg.Command.(Op)
 			if !ok {
 				log.Fatal(fmt.Sprintf("[%d] KVServer.Run() invalid command msg from applyCh %v", kv.me, msg))
 			}
-			kv.mu.Lock()
-			// fix a bug in TestManyPartitionsOneClient3A, detect duplicate by staged.
-			//if _, ok := kv.staged[op.Cid]; ok {
-			//	kv.mu.Unlock()
-			//	log.Printf("[%d] Cid %d present in staged", kv.me, op.Cid)
-			//	continue
-			//}
 			is_duplicate := false
 			if cid, ok := latest_cids[op.Cid>>32]; ok && op.Cid <= cid {
 				log.Printf("[%d] Cid %d present in dedup", kv.me, op.Cid)
@@ -300,6 +283,7 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 			} else {
 				log.Printf("[%d] Cid %d op %v to apply", kv.me, op.Cid, op)
 			}
+			kv.mu.Lock()
 			switch op.Type {
 			case kGet:
 				if v, ok := kv.data[op.Key]; ok {
@@ -316,11 +300,6 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 				if !is_duplicate {
 					kv.data[op.Key] += op.Value
 				}
-				//if _, ok := kv.data[op.Key]; ok {
-				//	kv.data[op.Key] += op.Value
-				//} else {
-				//	kv.data[op.Key] = op.Value
-				//}
 				kv.staged[op.Cid] = PutAppendReply{WrongLeader: false, Err: OK}
 			}
 			if _, ok := kv.pendings[op.Cid]; ok {
@@ -350,7 +329,6 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 			}
 		} else if msg.CommandIndex == -2 { // to leader/follower
 			if kv.leading = msg.Command.(bool); !kv.leading {
-				// clear pendings
 				log.Printf("[%d] clear pendings", kv.me)
 				kv.mu.Lock()
 				n := len(kv.pendings)
@@ -364,13 +342,12 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 				kv.mu.Unlock()
 			}
 		} else { // install snapshot
-			log.Printf("[%d] incoming snapshot", kv.me)
+			log.Printf("[%d] incoming snapshot %d", kv.me, msg.CommandIndex-1)
 			ss, ok := msg.Command.([]byte)
 			if !ok {
 				log.Fatal(fmt.Sprintf("[%d] KVServer.Run() invalid install snapshot msg %v", kv.me, msg))
 			}
 			data_ := make(map[string]string)
-			//staged_ := make(map[uint64]interface{})
 			latest_cids_ := make(map[uint64]uint64)
 			buf := bytes.NewBuffer(ss)
 			dec := labgob.NewDecoder(buf)
@@ -379,22 +356,14 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 			} else if err := dec.Decode(&latest_cids_); err != nil {
 				log.Fatal(fmt.Sprintf("[%d] KVServer.Run() decode dedup from snapshot error! %s", kv.me, err.Error()))
 			}
-			//for k, _ := range staged_ {
-			//	if cid, ok := latest_cids[k>>32]; !ok || cid < k {
-			//		latest_cids[k>>32] = k
-			//	}
-			//}
-			for _, k := range latest_cids_ {
-				if cid, ok := latest_cids[k>>32]; !ok || cid < k {
-					latest_cids[k>>32] = k
-				}
-			}
+			latest_cids = latest_cids_
 			nkeys_new := len(data_)
+
 			kv.mu.Lock()
 			nkeys_old := len(kv.data)
 			kv.data = data_
-			//kv.staged = staged_
 			kv.mu.Unlock()
+
 			log.Printf("[%d] install snapshot complete, #keys %d => %d", kv.me, nkeys_old, nkeys_new)
 		}
 	}

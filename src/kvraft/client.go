@@ -29,7 +29,7 @@ func nrand() int64 {
 
 func (ck *Clerk) newid() uint64 {
 	var n uint64 = uint64(atomic.AddUint32(&ck.rqseq, 1))
-	log.Printf("[%d] newid() cidbase %v cid %v", ck.me, ck.cidbase, ck.cidbase|n)
+	log.Printf("newid() cidbase %v cid %v", ck.cidbase, ck.cidbase|n)
 	return (ck.cidbase | n)
 }
 
@@ -67,22 +67,25 @@ func (ck *Clerk) Get(key string) string {
 	j := 0
 	for i := ck.leaderIdx; i < len(ck.servers); i++ {
 		var reply GetReply
-		log.Printf("[%d] Clerk Call Get %v retry %d", ck.me, key, j)
+		log.Printf("cid %d Clerk Call Get on %v to %v retry %d", cid, key, ck.servers[i], j)
 		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 		if ok && !reply.WrongLeader { // FIXME if !ok should we retry the same peer or retry another peer?
 			ck.leaderIdx = i
 			if reply.Err == OK {
 				return reply.Value
 			} else if reply.Err != ErrNoKey {
-				log.Printf("[%d] Get() err: %v", ck.me, reply.Err)
+				log.Printf("cid %d Clerk.Get() err: %v", cid, reply.Err)
 			}
 			return ""
+		} else if !ok {
+			log.Printf("cid %d Clerk Call Get on %v to %v retry %d rpc error", cid, key, ck.servers[i], j)
 		}
 		if i == len(ck.servers)-1 {
 			i = -1
 		}
 		j++
 		if j > 100 { // 1s ~= election timeout
+			log.Printf("WARN Call Get on %v failed", key)
 			break
 		}
 		time.Sleep(time.Millisecond * time.Duration(100))
@@ -107,21 +110,23 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	j := 0
 	for i := ck.leaderIdx; i < len(ck.servers); i++ {
 		var reply PutAppendReply
-		log.Printf("[%d] Clerk Call PutAppend %v retry %d", ck.me, key, j)
+		log.Printf("cid %d Clerk.Call %s on %v to %v retry %d", cid, op, key, ck.servers[i], j)
 		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
 		if ok && !reply.WrongLeader { // FIXME if !ok should we retry the same peer or retry another peer?
 			ck.leaderIdx = i
-			if reply.Err == OK {
-				return
+			if reply.Err != OK {
+				log.Printf("cid %d Clerk.PutAppend() err: %v", cid, reply.Err)
 			}
-			log.Printf("[%d] PutAppend() err: %v", ck.me, reply.Err)
 			return
+		} else if !ok {
+			log.Printf("cid %d Clerk Call %s on %v to %v retry %d rpc error", cid, op, key, ck.servers[i], j)
 		}
 		if i == len(ck.servers)-1 {
 			i = -1
 		}
 		j++
 		if j > 100 { // 1s ~= election timeout
+			log.Printf("WARN Call %s on %v failed", op, key)
 			break
 		}
 		time.Sleep(time.Millisecond * time.Duration(100))

@@ -100,7 +100,7 @@ type Raft struct {
 	is_leader_    bool
 	current_term_ int
 	voted_for_    int
-	data_         []LogEntry // WAL
+	wal_          []LogEntry // WAL
 	commit_index_ int        // last commited log index
 	events_       chan Event
 	apply_chan_   chan ApplyMsg
@@ -167,7 +167,7 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-	log.Printf("[%d] Raft.persist() term %d votedFor %d lastIncluded %d #logs %d committed %d", rf.me, rf.current_term_, rf.voted_for_, rf.ss_index, len(rf.data_), rf.commit_index_)
+	log.Printf("[%d] Raft.persist() term %d votedFor %d lastIncluded %d #logs %d committed %d", rf.me, rf.current_term_, rf.voted_for_, rf.ss_index, len(rf.wal_), rf.commit_index_)
 	rf.persister.SaveRaftState(rf.serialize())
 }
 func (rf *Raft) serialize() []byte {
@@ -175,7 +175,7 @@ func (rf *Raft) serialize() []byte {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.current_term_)
 	e.Encode(rf.voted_for_)
-	e.Encode(rf.data_)
+	e.Encode(rf.wal_)
 	e.Encode(rf.commit_index_)
 	e.Encode(rf.ss_index)
 	e.Encode(rf.ss_term)
@@ -190,9 +190,9 @@ func (rf *Raft) SaveSnapshot(ss []byte, last_included int) bool {
 	return rf.saveSnapshot(ss, last_included, -1)
 }
 func (rf *Raft) saveSnapshot(ss []byte, last_included int, last_included_term int) bool {
-	log.Printf("[%d] Raft.SaveSnapshot() term %d votedFor %d committed %d ssindex %d lastIncluded %d #logs %d", rf.me, rf.current_term_, rf.voted_for_, rf.commit_index_, last_included, rf.ss_index, len(rf.data_))
+	log.Printf("[%d] Raft.SaveSnapshot() term %d votedFor %d committed %d ssindex %d lastIncluded %d #logs %d", rf.me, rf.current_term_, rf.voted_for_, rf.commit_index_, last_included, rf.ss_index, len(rf.wal_))
 	if last_included < rf.ss_index {
-		log.Printf("[%d] WARN invalid ssindex %d lastIncluded %d #logs %d", rf.me, last_included, rf.ss_index, len(rf.data_))
+		log.Printf("[%d] WARN invalid ssindex %d lastIncluded %d #logs %d", rf.me, last_included, rf.ss_index, len(rf.wal_))
 		return false
 	}
 	if last_included_term > -1 {
@@ -200,15 +200,13 @@ func (rf *Raft) saveSnapshot(ss []byte, last_included int, last_included_term in
 	} else if last_included < rf.dataEnd() {
 		rf.ss_term = rf.wal(last_included).Term
 	}
-	newdata := make([]LogEntry, 0, 1)
+	logs := make([]LogEntry, 0, 1)
 	for i := last_included + 1; i < rf.dataEnd(); i++ {
-		newdata = append(newdata, rf.wal(i))
+		logs = append(logs, rf.wal(i))
 	}
-	rf.data_ = newdata
+	rf.wal_ = logs
 	rf.ss_index = last_included
-	if rf.commit_index_ < rf.ss_index {
-		rf.commit_index_ = rf.ss_index
-	}
+	rf.commit_index_ = rf.ss_index
 	rfsize := rf.persister.RaftStateSize()
 	rf.persister.SaveStateAndSnapshot(rf.serialize(), ss)
 	log.Printf("[%d] after snapshot, RaftStateSize %d => %d", rf.me, rfsize, rf.persister.RaftStateSize())
@@ -259,7 +257,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.is_leader_ = false
 		rf.current_term_ = term
 		rf.voted_for_ = voted_for
-		rf.data_ = logs
+		rf.wal_ = logs
 		rf.commit_index_ = committed
 		rf.ss_index = ss_index
 		rf.ss_term = ss_term
@@ -267,16 +265,16 @@ func (rf *Raft) readPersist(data []byte) {
 			rf.ballot[i] = false
 		}
 	}
-	log.Printf("[%d] Raft.readPersist() term %d votedFor %d #logs %d committed %d ssIdx %d ssTerm %d", rf.me, rf.current_term_, rf.voted_for_, len(rf.data_), rf.commit_index_, rf.ss_index, rf.ss_term)
+	log.Printf("[%d] Raft.readPersist() term %d votedFor %d #logs %d committed %d ssIdx %d ssTerm %d", rf.me, rf.current_term_, rf.voted_for_, len(rf.wal_), rf.commit_index_, rf.ss_index, rf.ss_term)
 	return
 }
 
 func (rf *Raft) logsDescriptor() LogEntryDescriptor {
 	var ld LogEntryDescriptor
 	if rf.dataEnd() > 0 {
-		if len(rf.data_) > 0 {
+		if len(rf.wal_) > 0 {
 			ld.Index = rf.dataEnd() - 1
-			ld.Term = rf.data_[len(rf.data_)-1].Term
+			ld.Term = rf.wal_[len(rf.wal_)-1].Term
 		} else {
 			ld.Index = rf.ss_index
 			ld.Term = rf.ss_term
@@ -495,7 +493,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// install snapshot
 	if has_snapshot && rf.saveSnapshot(args.Snapshot, args.PrevLog.Index, args.PrevLog.Term) {
-		rf.notify(&Event{kOnInstallSnapshot, ApplyMsg{false, args.Snapshot, args.PrevLog.Index}, nil})
+		rf.notify(&Event{kOnInstallSnapshot, ApplyMsg{false, args.Snapshot, args.PrevLog.Index+1}, nil})
 	}
 	// check for gap again
 	if rf.dataEnd() < args.PrevLog.Index+1 {
@@ -518,7 +516,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// append any new entries
 	if requestEnd > rf.dataEnd() {
 		start := rf.dataEnd() - (args.PrevLog.Index + 1)
-		rf.data_ = append(rf.data_, args.Entries[start:]...)
+		rf.wal_ = append(rf.wal_, args.Entries[start:]...)
 		appended = true
 	}
 	reply.Success, reply.ConflictTerm, reply.ConflictIndex = true, 0, rf.dataEnd()
@@ -656,16 +654,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isleader
 	}
 	term = rf.current_term_
-	rf.data_ = append(rf.data_, LogEntry{term, command})
+	rf.wal_ = append(rf.wal_, LogEntry{term, command})
 	index = rf.dataEnd() - 1
 	log.Printf("[%d] Raft.Start(%v) index %d", rf.me, command, index)
 	// also update replicators[me] here
 	rf.replicators_[rf.me].MatchIndex = index
 	rf.replicators_[rf.me].NextIndex = index + 1
 	for i := 0; i < len(rf.replicators_); i++ {
-		//if i != rf.me {
-		//	rf.refreshHeartbeatTimeout(i, 10) // FIXME
-		//}
+		if i != rf.me {
+			rf.refreshHeartbeatTimeout(i, 10)
+		}
 	}
 	return index + 1, term, isleader // according to raft paper, the first index is 1 not 0
 }
@@ -712,7 +710,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voted_for_ = -1
 	rf.current_term_ = 0
 	rf.is_leader_ = false
-	rf.data_ = make([]LogEntry, 0, 1)
+	rf.wal_ = make([]LogEntry, 0, 1)
 	rf.commit_index_ = -1
 	rf.events_ = make(chan Event, 4096)
 	rf.events_flag = 0
@@ -740,7 +738,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) GetLogs() ([]LogEntry, int) {
-	return rf.data_, rf.commit_index_
+	return rf.wal_, rf.commit_index_
 }
 
 func (rf *Raft) GetSnapshot() []byte {
@@ -874,8 +872,8 @@ func (rf *Raft) Run() {
 				if next < rf.ss_index+1 { // attach snapshot
 					args.Snapshot = make([]byte, len(rf.persister.snapshot))
 					copy(args.Snapshot, rf.persister.snapshot)
-					args.Entries = make([]LogEntry, len(rf.data_))
-					copy(args.Entries, rf.data_)
+					args.Entries = make([]LogEntry, len(rf.wal_))
+					copy(args.Entries, rf.wal_)
 				} else if next < rf.dataEnd() {
 					args.Entries = make([]LogEntry, rf.dataEnd()-next)
 					copy(args.Entries, rf.subLogs(next))
@@ -932,9 +930,9 @@ func (rf *Raft) Run() {
 						break
 					}
 				}
-				//if r.NextIndex < rf.dataEnd() {
-				//	rf.refreshHeartbeatTimeout(server, 10) // FIXME
-				//}
+				if r.NextIndex < rf.dataEnd() {
+					rf.refreshHeartbeatTimeout(server, 10)
+				}
 			} else if reply.ConflictTerm == -1 && reply.ConflictIndex == -1 {
 				log.Printf("[%d] WARN AppendEntries error, args term %d reply term %d", rf.me, args.Term, reply.Term)
 				r.NextIndex, r.MatchIndex = rf.dataEnd(), -1
@@ -951,7 +949,7 @@ func (rf *Raft) Run() {
 						}
 					}
 				}
-				//rf.refreshHeartbeatTimeout(server, 10) // FIXME
+				rf.refreshHeartbeatTimeout(server, 10)
 			}
 			if new_commit > -1 {
 				commit := rf.commit_index_
@@ -976,28 +974,28 @@ func (rf *Raft) Run() {
 
 func (rf *Raft) wal(index int) LogEntry {
 	if index < rf.ss_index {
-		log.Printf("[%d] WARN wal()=nil index %d < lastIncluded %d #logs %d", rf.me, index, rf.ss_index, len(rf.data_))
+		log.Printf("[%d] WARN wal()=nil index %d < lastIncluded %d #logs %d", rf.me, index, rf.ss_index, len(rf.wal_))
 		return LogEntry{0, nil}
 	} else if index == rf.ss_index {
-		log.Printf("[%d] WARN wal()=nil index %d = lastIncluded %d #logs %d", rf.me, index, rf.ss_index, len(rf.data_))
+		log.Printf("[%d] WARN wal()=nil index %d = lastIncluded %d #logs %d", rf.me, index, rf.ss_index, len(rf.wal_))
 		return LogEntry{rf.ss_term, nil}
 	} else {
-		return rf.data_[index-rf.ss_index-1]
+		return rf.wal_[index-rf.ss_index-1]
 	}
 }
 func (rf *Raft) truncateLogs(index int) {
 	if index < rf.ss_index+1 {
-		rf.data_ = make([]LogEntry, 0, 1)
+		rf.wal_ = make([]LogEntry, 0, 1)
 	} else {
-		rf.data_ = rf.data_[:index-rf.ss_index-1]
+		rf.wal_ = rf.wal_[:index-rf.ss_index-1]
 	}
 	return
 }
 func (rf *Raft) subLogs(index int) []LogEntry {
-	return rf.data_[index-rf.ss_index-1:]
+	return rf.wal_[index-rf.ss_index-1:]
 }
 func (rf *Raft) dataEnd() int {
-	return rf.ss_index + 1 + len(rf.data_)
+	return rf.ss_index + 1 + len(rf.wal_)
 }
 func (rf *Raft) countVotes() (votes int) {
 	for _, pro := range rf.ballot {
