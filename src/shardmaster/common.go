@@ -71,3 +71,10 @@ type QueryReply struct {
 	Err         Err
 	Config      Config
 }
+
+const (
+	kJoin  = 1
+	kLeave = 2
+	kMove  = 3
+	kQuery = 4
+)
