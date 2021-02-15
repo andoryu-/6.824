@@ -2,7 +2,6 @@ package raftkv
 
 import (
 	"bytes"
-	"fmt"
 	"labgob"
 	"labrpc"
 	"log"
@@ -226,9 +225,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		buf := bytes.NewBuffer(ss)
 		dec := labgob.NewDecoder(buf)
 		if err := dec.Decode(&data_); err != nil {
-			log.Fatal(fmt.Sprintf("[%d] StartKVServer() decode snapshot error! %s", kv.me, err.Error()))
+			log.Fatalf("[%d] StartKVServer() decode snapshot error! %s", kv.me, err.Error())
 		} else if err := dec.Decode(&latest_cids); err != nil {
-			log.Fatal(fmt.Sprintf("[%d] KVServer.Run() decode dedup from snapshot error! %s", kv.me, err.Error()))
+			log.Fatalf("[%d] KVServer.Run() decode dedup from snapshot error! %s", kv.me, err.Error())
 		}
 		kv.data = data_
 	}
@@ -274,7 +273,7 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 		if msg.CommandValid { // Get/Put/Append
 			op, ok := msg.Command.(Op)
 			if !ok {
-				log.Fatal(fmt.Sprintf("[%d] KVServer.Run() invalid command msg from applyCh %v", kv.me, msg))
+				log.Fatalf("[%d] KVServer.Run() invalid command msg from applyCh %v", kv.me, msg)
 			}
 			is_duplicate := false
 			if cid, ok := latest_cids[op.Cid>>32]; ok && op.Cid <= cid {
@@ -320,9 +319,9 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 				w := new(bytes.Buffer)
 				enc := labgob.NewEncoder(w)
 				if err := enc.Encode(kv.data); err != nil {
-					log.Fatal(fmt.Sprintf("[%d] KVServer.Run() encode KVMap into snapshot error! %s", kv.me, err.Error()))
+					log.Fatalf("[%d] KVServer.Run() encode KVMap into snapshot error! %s", kv.me, err.Error())
 				} else if err := enc.Encode(latest_cids); err != nil {
-					log.Fatal(fmt.Sprintf("[%d] KVServer.Run() encode dedup into snapshot error! %s", kv.me, err.Error()))
+					log.Fatalf("[%d] KVServer.Run() encode dedup into snapshot error! %s", kv.me, err.Error())
 				}
 				// NOTE: here it hold applyCh and wait for raft lock. Raft must not hold raft lock and wait for applyCh
 				kv.rf.SaveSnapshot(w.Bytes(), msg.CommandIndex-1)
@@ -332,7 +331,7 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 				log.Printf("[%d] clear pendings", kv.me)
 				kv.mu.Lock()
 				n := len(kv.pendings)
-				for cid, _ := range kv.pendings {
+				for cid := range kv.pendings {
 					kv.cancelled[cid] = true
 					delete(kv.pendings, cid)
 				}
@@ -345,16 +344,16 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 			log.Printf("[%d] incoming snapshot %d", kv.me, msg.CommandIndex-1)
 			ss, ok := msg.Command.([]byte)
 			if !ok {
-				log.Fatal(fmt.Sprintf("[%d] KVServer.Run() invalid install snapshot msg %v", kv.me, msg))
+				log.Fatalf("[%d] KVServer.Run() invalid install snapshot msg %v", kv.me, msg)
 			}
 			data_ := make(map[string]string)
 			latest_cids_ := make(map[uint64]uint64)
 			buf := bytes.NewBuffer(ss)
 			dec := labgob.NewDecoder(buf)
 			if err := dec.Decode(&data_); err != nil {
-				log.Fatal(fmt.Sprintf("[%d] KVServer.Run() decode KVMap from snapshot error! %s", kv.me, err.Error()))
+				log.Fatalf("[%d] KVServer.Run() decode KVMap from snapshot error! %s", kv.me, err.Error())
 			} else if err := dec.Decode(&latest_cids_); err != nil {
-				log.Fatal(fmt.Sprintf("[%d] KVServer.Run() decode dedup from snapshot error! %s", kv.me, err.Error()))
+				log.Fatalf("[%d] KVServer.Run() decode dedup from snapshot error! %s", kv.me, err.Error())
 			}
 			latest_cids = latest_cids_
 			nkeys_new := len(data_)
@@ -373,12 +372,12 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 func (kv *KVServer) purgeStaged(cid uint64) {
 	var cidbase uint64 = cid >> 32
 	var mask uint64 = cidbase << 32
-	for i, _ := range kv.staged {
+	for i := range kv.staged {
 		if ((i & mask) == mask) && i < cid {
 			delete(kv.staged, i)
 		}
 	}
-	for i, _ := range kv.cancelled {
+	for i := range kv.cancelled {
 		if ((i & mask) == mask) && i < cid {
 			delete(kv.cancelled, i)
 		}

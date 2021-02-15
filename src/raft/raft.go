@@ -437,12 +437,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer func() {
 		log.Printf("[%d] AppendEntries() reply{Term:%d,Success:%v,conflictIndex:%d,conflictTerm:%d} VotedFor %d", rf.me, reply.Term, reply.Success, reply.ConflictIndex, reply.ConflictTerm, voted_for)
 	}()
+
+	// lock against concurrency
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	reply.Term, reply.Success, reply.GrpIdx = rf.current_term_, true, rf.me
 	if args.Term < rf.current_term_ {
 		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, -1, -1
-		rf.mu.Unlock()
 		return
 	}
 
@@ -464,7 +466,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// check for gap
 	if args.PrevLog.Index >= rf.dataEnd() && !has_snapshot {
 		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, 0, rf.dataEnd()
-		rf.mu.Unlock()
 		return
 	}
 
@@ -479,7 +480,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, rf.ss_term, rf.ss_index
 			rf.truncateLogs(args.PrevLog.Index)
 			rf.persist()
-			rf.mu.Unlock()
 			return
 		}
 	} else if args.PrevLog.Index < rf.dataEnd() {
@@ -496,7 +496,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, conflict_term, conflict_start_index
 			rf.truncateLogs(args.PrevLog.Index)
 			rf.persist()
-			rf.mu.Unlock()
 			return
 		}
 	}
@@ -507,7 +506,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// check for gap again
 	if rf.dataEnd() < args.PrevLog.Index+1 {
 		reply.Success, reply.ConflictTerm, reply.ConflictIndex = false, 0, rf.dataEnd()
-		rf.mu.Unlock()
 		return
 	}
 	need_persist := false
@@ -543,7 +541,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	m := make([]ApplyMsg, 0, 1)
 	if rf.apply_index_ < rf.ss_index {
-		panic(fmt.Sprintf("[%d] last applied %d < ssindex %d", rf.me, rf.apply_index_, rf.ss_index))
+		log.Fatalf("[%d] FATAL last applied %d < ssindex %d", rf.me, rf.apply_index_, rf.ss_index)
 	}
 	// commit entries
 	if rf.apply_index_ < rf.commit_index_ {
@@ -555,27 +553,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.notify(&Event{kOnApply, m, nil})
 		need_persist = true
 	}
+
 	if need_persist {
 		rf.persist()
 	}
-	//commit := rf.commit_index_
-	//if commit < rf.ss_index {
-	//    panic(fmt.Sprintf("[%d] last applied %d < ssindex %d", rf.me, commit, rf.ss_index))
-	//}
-	//// commit entries
-	//if rf.commit_index_ < new_commit {
-	//	log.Printf("[%d] Apply index (%d, %d] according to leader %d", rf.me, rf.commit_index_, new_commit, args.GrpIdx)
-	//	rf.commit_index_ = new_commit
-	//	rf.persist()
-	//} else if truncated || appended {
-	//	rf.persist()
-	//}
-	//m := make([]ApplyMsg, 0, 1)
-	//for i := commit + 1; i <= new_commit; i++ {
-	//	m = append(m, ApplyMsg{true, rf.wal(i).Command, i + 1})
-	//}
-	//rf.notify(&Event{kOnApply, m, nil})
-	rf.mu.Unlock()
 	return
 }
 
