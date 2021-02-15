@@ -1,10 +1,11 @@
 package shardmaster
 
-import "raft"
-import "labrpc"
-import "sync"
-import "labgob"
-import "fmt"
+import (
+	"labgob"
+	"labrpc"
+	"sync"
+	"raft"
+)
 
 type ShardMaster struct {
 	mu      sync.Mutex
@@ -85,7 +86,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		sm.cv.Wait()
 	}
 
-	if !sm.pendings[cid] {
+	if _, ok := sm.pendings[cid]; ok {
 		delete(sm.pendings, cid)
 		reply.WrongLeader = true
 	} else if i, ok := sm.staged[cid]; !ok {
@@ -121,6 +122,7 @@ func (sm *ShardMaster) Raft() *raft.Raft {
 // me is the index of the current server in servers[].
 //
 func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister) *ShardMaster {
+	log.SetFlags(log.Ltime | log.Ldate | log.Lshortfile | Lmsgprefix)
 	sm := new(ShardMaster)
 	sm.me = me
 
@@ -168,9 +170,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 		buf := bytes.NewBuffer(ss)
 		dec := labgob.NewDecoder(buf)
 		if err := dec.Decode(&data_); err != nil {
-			log.Fatal(fmt.Sprintf("[%d] StartKVServer() decode snapshot error! %s", sm.me, err.Error()))
+			log.Fatalf("[%d] StartKVServer() decode snapshot error! %s", sm.me, err.Error())
 		} else if err := dec.Decode(&latest_cids); err != nil {
-			log.Fatal(fmt.Sprintf("[%d] ShardMaster.Run() decode dedup from snapshot error! %s", sm.me, err.Error()))
+			log.Fatalf("[%d] ShardMaster.Run() decode dedup from snapshot error! %s", sm.me, err.Error())
 		}
 		sm.configs = data_
 	}
@@ -211,7 +213,7 @@ func (sm *ShardMaster) Run(latest_cids map[uint64]uint64) {
 		if msg.CommandValid { // Join/Leave/Move/Query
 			op, ok := msg.Command.(Op)
 			if !ok {
-				log.Fatal(fmt.Sprintf("[%d] ShardMaster.Run() invalid command msg from applyCh %v", sm.me, msg))
+				log.Fatalf("[%d] ShardMaster.Run() invalid command msg from applyCh %v", sm.me, msg)
 			}
 			is_duplicate := false
 			if cid, ok := latest_cids[op.Cid>>32]; ok && op.Cid <= cid {
@@ -259,16 +261,16 @@ func (sm *ShardMaster) Run(latest_cids map[uint64]uint64) {
 			log.Printf("[%d] incoming snapshot %d", sm.me, msg.CommandIndex-1)
 			ss, ok := msg.Command.([]byte)
 			if !ok {
-				log.Fatal(fmt.Sprintf("[%d] ShardMaster.Run() invalid install snapshot msg %v", sm.me, msg))
+				log.Fatalf("[%d] ShardMaster.Run() invalid install snapshot msg %v", sm.me, msg)
 			}
 			data_ := make([]Config, 0, 1)
 			latest_cids_ := make(map[uint64]uint64)
 			buf := bytes.NewBuffer(ss)
 			dec := labgob.NewDecoder(buf)
 			if err := dec.Decode(&data_); err != nil {
-				log.Fatal(fmt.Sprintf("[%d] ShardMaster.Run() decode configs from snapshot error! %s", sm.me, err.Error()))
+				log.Fatalf("[%d] ShardMaster.Run() decode configs from snapshot error! %s", sm.me, err.Error())
 			} else if err := dec.Decode(&latest_cids_); err != nil {
-				log.Fatal(fmt.Sprintf("[%d] ShardMaster.Run() decode dedup-table from snapshot error! %s", sm.me, err.Error()))
+				log.Fatalf("[%d] ShardMaster.Run() decode dedup-table from snapshot error! %s", sm.me, err.Error())
 			}
 			latest_cids = latest_cids_
 			nkeys_new := len(data_)
