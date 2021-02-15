@@ -39,10 +39,11 @@ type KVServer struct {
 	// Your definitions here.
 	// currently we only maintain pending request to detect implementation errors, such as lost notification
 	// if there're too many spurious wakeups, we might use pendings[cid] to store separate condvar
-	pendings map[uint64]interface{} // map cid to pending requests
+	//pendings map[uint64]interface{} // map cid to pending requests
+	pendings map[uint64]bool // pending request state: to exists/cancelled
 
 	staged    map[uint64]interface{} // map cid to reply
-	cancelled map[uint64]bool        // map cid to reply
+	//cancelled map[uint64]bool        // map cid to reply
 	cv        *sync.Cond
 	data      map[string]string
 	leading   bool
@@ -72,26 +73,32 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			return
 		}
 		kv.mu.Lock()
-		kv.pendings[cid] = op
+		//kv.pendings[cid] = op
+		kv.pendings[cid] = true
 	}
 
 	log.Printf("[%d] KVServer.Get(%v) before wait", kv.me, args)
 
 	for {
-		if _, ok := kv.pendings[cid]; !ok {
+		if !kv.pendings[cid] {
 			break
 		}
+		//if _, ok := kv.pendings[cid]; !ok {
+		//	break
+		//}
 		if _, ok := kv.staged[cid]; ok {
 			break
 		}
-		if _, ok := kv.cancelled[cid]; ok {
-			break
-		}
+		//if _, ok := kv.cancelled[cid]; ok {
+		//	break
+		//}
 		kv.cv.Wait()
 	}
 
-	if _, ok := kv.cancelled[cid]; ok {
-		delete(kv.cancelled, cid)
+	if _, ok := kv.pendings[cid]; ok {
+	//if _, ok := kv.cancelled[cid]; ok {
+		//delete(kv.cancelled, cid)
+		delete(kv.pendings, cid)
 		reply.WrongLeader = true
 	} else if i, ok := kv.staged[cid]; !ok {
 		log.Printf("[%d] WARN Cid %d absent in staged, maybe lost leadership", kv.me, cid)
@@ -131,26 +138,32 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		}
 		kv.mu.Lock()
-		kv.pendings[cid] = op
+		//kv.pendings[cid] = op
+		kv.pendings[cid] = true
 	}
 
 	log.Printf("[%d] KVServer.PutAppend({%v %v %v}) before wait", kv.me, args.Key, args.Op, args.Cid)
 
 	for {
-		if _, ok := kv.pendings[cid]; !ok {
+		if !kv.pendings[cid] {
 			break
 		}
+		//if _, ok := kv.pendings[cid]; !ok {
+		//	break
+		//}
 		if _, ok := kv.staged[cid]; ok {
 			break
 		}
-		if _, ok := kv.cancelled[cid]; ok {
-			break
-		}
+		//if _, ok := kv.cancelled[cid]; ok {
+		//	break
+		//}
 		kv.cv.Wait()
 	}
 
-	if _, ok := kv.cancelled[cid]; ok {
-		delete(kv.cancelled, cid)
+	if _, ok := kv.pendings[cid]; ok {
+	//if _, ok := kv.cancelled[cid]; ok {
+		//delete(kv.cancelled, cid)
+		delete(kv.pendings, cid)
 		reply.WrongLeader = true
 	} else if i, ok := kv.staged[cid]; !ok {
 		log.Printf("[%d] WARN Cid %d absent in staged, maybe lost leadership", kv.me, cid)
@@ -212,9 +225,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.pendings = make(map[uint64]interface{})
+	//kv.pendings = make(map[uint64]interface{})
+	kv.pendings = make(map[uint64]bool)
 	kv.staged = make(map[uint64]interface{})
-	kv.cancelled = make(map[uint64]bool)
+	//kv.cancelled = make(map[uint64]bool)
 	kv.cv = sync.NewCond(&(kv.mu))
 	kv.data = make(map[string]string)
 	kv.leading = false
@@ -332,8 +346,9 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 				kv.mu.Lock()
 				n := len(kv.pendings)
 				for cid := range kv.pendings {
-					kv.cancelled[cid] = true
-					delete(kv.pendings, cid)
+					kv.pendings[cid] = false
+					//kv.cancelled[cid] = true
+					//delete(kv.pendings, cid)
 				}
 				if n > 0 {
 					kv.cv.Broadcast()
@@ -368,18 +383,17 @@ func (kv *KVServer) Run(latest_cids map[uint64]uint64) {
 	}
 }
 
-// manage kv.staged, it is okay to assume that each client make only one outstanding request
-func (kv *KVServer) purgeStaged(cid uint64) {
-	var cidbase uint64 = cid >> 32
-	var mask uint64 = cidbase << 32
-	for i := range kv.staged {
-		if ((i & mask) == mask) && i < cid {
-			delete(kv.staged, i)
-		}
-	}
-	for i := range kv.cancelled {
-		if ((i & mask) == mask) && i < cid {
-			delete(kv.cancelled, i)
-		}
-	}
-}
+//func (kv *KVServer) purgeStaged(cid uint64) {
+//	var cidbase uint64 = cid >> 32
+//	var mask uint64 = cidbase << 32
+//	for i := range kv.staged {
+//		if ((i & mask) == mask) && i < cid {
+//			delete(kv.staged, i)
+//		}
+//	}
+//	for i := range kv.cancelled {
+//		if ((i & mask) == mask) && i < cid {
+//			delete(kv.cancelled, i)
+//		}
+//	}
+//}
