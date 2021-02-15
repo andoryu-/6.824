@@ -539,13 +539,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commit_index_ = new_commit
 		need_persist = true
 	}
-	m := make([]ApplyMsg, 0, 1)
 	if rf.apply_index_ < rf.ss_index {
 		log.Fatalf("[%d] FATAL last applied %d < ssindex %d", rf.me, rf.apply_index_, rf.ss_index)
 	}
 	// commit entries
 	if rf.apply_index_ < rf.commit_index_ {
 		log.Printf("[%d] Apply index (%d, %d] according to leader %d", rf.me, rf.apply_index_, rf.commit_index_, args.GrpIdx)
+		m := make([]ApplyMsg, 0, 1)
 		for i := rf.apply_index_ + 1; i <= rf.commit_index_; i++ {
 			m = append(m, ApplyMsg{true, rf.wal(i).Command, i + 1})
 		}
@@ -735,9 +735,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.readPersist(persister.ReadRaftState())
 	for i := 0; i < len(peers); i++ {
-		rf.replicators_[i].timer_ = &TimedClosure{}
-		rf.replicators_[i].NextIndex = rf.dataEnd()
-		rf.replicators_[i].MatchIndex = -1
+		rf.replicators_ = append(rf.replicators_, Replicator{rf.dataEnd(), -1, &TimedClosure{}})
 	}
 
 	go rf.Run()
@@ -920,7 +918,6 @@ func (rf *Raft) Run() {
 			r := &rf.replicators_[server]
 			vote := 0
 			new_commit := -1
-			m := make([]ApplyMsg, 0, 1)
 			need_persist := false
 			if reply.Success {
 				if reply.ConflictIndex > r.NextIndex {
@@ -956,21 +953,11 @@ func (rf *Raft) Run() {
 				}
 				rf.refreshHeartbeatTimeout(server, 10)
 			}
-			//if new_commit > -1 {
-			//	commit := rf.commit_index_
-			//	if commit < new_commit {
-			//		log.Printf("[%d] Apply index (%d, %d] as leader pro %d con %d", rf.me, commit, new_commit, vote, len(rf.replicators_)-vote)
-			//		rf.commit_index_ = new_commit
-			//		rf.persist()
-			//	}
-			//	for i := commit + 1; i <= new_commit; i++ {
-			//		m = append(m, ApplyMsg{true, rf.wal(i).Command, i + 1})
-			//	}
-			//}
 			if rf.commit_index_ < new_commit {
 				rf.commit_index_ = new_commit
 				need_persist = true
 			}
+			m := make([]ApplyMsg, 0, 1)
 			if rf.apply_index_ < rf.commit_index_ {
 				log.Printf("[%d] Apply index (%d, %d] as leader pro %d con %d", rf.me, rf.apply_index_, rf.commit_index_, vote, len(rf.replicators_)-vote)
 				for i := rf.apply_index_ + 1; i <= rf.commit_index_; i++ {
