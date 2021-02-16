@@ -744,7 +744,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) GetLogs() ([]LogEntry, int) {
-	return rf.wal_, rf.commit_index_
+	return rf.wal_, rf.apply_index_
 }
 
 func (rf *Raft) GetSnapshot() []byte {
