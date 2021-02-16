@@ -3,8 +3,8 @@ package shardmaster
 import (
 	"labgob"
 	"labrpc"
-	"sync"
 	"raft"
+	"sync"
 )
 
 type ShardMaster struct {
@@ -35,16 +35,81 @@ type Op struct {
 	QueryConfig    int
 }
 
+func (sm *ShardMaster) startOp(op *Op, result interface{}) {
+	cid := op.Cid
+	sm.mu.Lock()
+
+	if sm.leading {
+		if i, ok := sm.staged[cid]; ok {
+			FillReply(result, op.Type, i)
+			sm.mu.Unlock()
+			return
+		}
+	}
+	if _, ok := sm.pendings[cid]; !ok {
+		sm.mu.Unlock()
+		if _, _, leading := sm.rf.Start(op); !leading {
+			NackReply(result, op.Type)
+			return
+		}
+		sm.mu.Lock()
+		sm.pendings[cid] = true
+	}
+
+	for {
+		if !sm.pendings[cid] { // ack cancellation
+			break
+		}
+		if _, ok := sm.staged[cid]; ok { // ack apply
+			break
+		}
+		sm.cv.Wait()
+	}
+
+	if i, ok := sm.staged[cid]; ok {
+		FillReply(result, op.Type, i)
+	} else {
+		NackReply(result, op.Type)
+	}
+	if _, ok := sm.pendings[cid]; ok {
+		delete(sm.pendings, cid)
+	}
+
+	sm.mu.Unlock()
+	return
+}
+
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
+	log.Printf("[%d] ShardMaster.Join(%v)", sm.me, args)
+	defer func() {
+		log.Printf("[%d] ShardMaster.Join(%v)=%v", sm.me, args, reply)
+	}()
+	cid := args.Cid
+	op := Op{Cid: cid, Type: kJoin, JoiningServers: args.Servers}
+	startOp(&op, reply)
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
+	log.Printf("[%d] ShardMaster.Leave(%v)", sm.me, args)
+	defer func() {
+		log.Printf("[%d] ShardMaster.Leave(%v)=%v", sm.me, args, reply)
+	}()
+	cid := args.Cid
+	op := Op{Cid: cid, Type: kLeave, LeavingGroups: args.GIDs}
+	startOp(&op, reply)
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	log.Printf("[%d] ShardMaster.Move(%v)", sm.me, args)
+	defer func() {
+		log.Printf("[%d] ShardMaster.Move(%v)=%v", sm.me, args, reply)
+	}()
+	cid := args.Cid
+	op := Op{Cid: cid, Type: kMove, MovingShard: args.Shard, MovingGroup: args.GID}
+	startOp(&op, reply)
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
@@ -55,48 +120,50 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	}()
 	cid := args.Cid
 	op := Op{Cid: cid, Type: kQuery, QueryConfig: args.Num}
-	sm.mu.Lock()
 
-	if sm.leading {
-		if _, ok := sm.staged[cid]; ok {
-			*reply = sm.staged[cid].(QueryReply)
-			sm.mu.Unlock()
-			return
-		}
-	}
-	if _, ok := sm.pendings[cid]; !ok {
-		sm.mu.Unlock()
-		if _, _, leading := sm.rf.Start(op); !leading {
-			reply.WrongLeader = true
-			return
-		}
-		sm.mu.Lock()
-		sm.pendings[cid] = true
-	}
+	startOp(&op, reply)
+	//sm.mu.Lock()
 
-	log.Printf("[%d] ShardMaster.Get(%v) before wait", sm.me, args)
+	//if sm.leading {
+	//	if _, ok := sm.staged[cid]; ok {
+	//		*reply = sm.staged[cid].(QueryReply)
+	//		sm.mu.Unlock()
+	//		return
+	//	}
+	//}
+	//if _, ok := sm.pendings[cid]; !ok {
+	//	sm.mu.Unlock()
+	//	if _, _, leading := sm.rf.Start(op); !leading {
+	//		reply.WrongLeader = true
+	//		return
+	//	}
+	//	sm.mu.Lock()
+	//	sm.pendings[cid] = true
+	//}
 
-	for {
-		if !sm.pendings[cid] {
-			break
-		}
-		if _, ok := sm.staged[cid]; ok {
-			break
-		}
-		sm.cv.Wait()
-	}
+	//log.Printf("[%d] ShardMaster.Get(%v) before wait", sm.me, args)
 
-	if _, ok := sm.pendings[cid]; ok {
-		delete(sm.pendings, cid)
-		reply.WrongLeader = true
-	} else if i, ok := sm.staged[cid]; !ok {
-		log.Printf("[%d] WARN Cid %d absent in staged, maybe lost leadership", sm.me, cid)
-		reply.WrongLeader, reply.Err, reply.Value = true, "", ""
-	} else {
-		*reply = i.(QueryReply)
-	}
-	sm.mu.Unlock()
-	return
+	//for {
+	//	if !sm.pendings[cid] {
+	//		break
+	//	}
+	//	if _, ok := sm.staged[cid]; ok {
+	//		break
+	//	}
+	//	sm.cv.Wait()
+	//}
+
+	//if _, ok := sm.pendings[cid]; ok {
+	//	delete(sm.pendings, cid)
+	//	reply.WrongLeader = true
+	//} else if i, ok := sm.staged[cid]; !ok {
+	//	log.Printf("[%d] WARN Cid %d absent in staged, maybe lost leadership", sm.me, cid)
+	//	reply.WrongLeader, reply.Err, reply.Value = true, "", ""
+	//} else {
+	//	*reply = i.(QueryReply)
+	//}
+	//sm.mu.Unlock()
+	//return
 }
 
 //
@@ -127,7 +194,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.me = me
 
 	sm.configs = make([]Config, 1)
-	sm.configs[0].Groups = map[int][]string{}
+	sm.configs[0].Num = 0
+	sm.configs[0].Groups = make(map[int][]string) // initialize to empty map
+	for shard := 0; shard < NShards; shard++ {
+		sm.configs[0].Shards[shard] = 0 // intialize to invalid GID zero
+	}
 
 	labgob.Register(Op{})
 	sm.applyCh = make(chan raft.ApplyMsg)
@@ -164,45 +235,50 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	// make dedup table
 	latest_cids := make(map[uint64]uint64)
+	var nkeys_new, nlogs_new int
 
+	// load Raft Snapshot
 	if ss := sm.rf.GetSnapshot(); len(ss) > 0 {
 		data_ := make([]Config, 0, 1)
 		buf := bytes.NewBuffer(ss)
 		dec := labgob.NewDecoder(buf)
 		if err := dec.Decode(&data_); err != nil {
-			log.Fatalf("[%d] StartKVServer() decode snapshot error! %s", sm.me, err.Error())
+			log.Fatalf("[%d] decode state from snapshot error! %s", sm.me, err.Error())
 		} else if err := dec.Decode(&latest_cids); err != nil {
-			log.Fatalf("[%d] ShardMaster.Run() decode dedup from snapshot error! %s", sm.me, err.Error())
+			log.Fatalf("[%d] decode dedup-table from snapshot error! %s", sm.me, err.Error())
 		}
 		sm.configs = data_
+		nkeys_new = len(data_)
 	}
 
-	logs, commit := sm.rf.GetLogs()
+	// apply Raft Logs into state machine
+	logs, lastApplied := sm.rf.GetLogs()
 	for i, entry := range logs {
-		if i > commit {
+		if i > lastApplied {
 			break
 		}
+		nlogs_new++
 		op := entry.Command.(Op)
-		is_duplicate := false
-		if cid, ok := latest_cids[op.Cid>>32]; ok && op.Cid <= cid {
+		clerkID := op.Cid >> 32
+		if cid, ok := latest_cids[clerkID]; ok && op.Cid <= cid {
 			log.Printf("[%d] cid %d present in dedup", sm.me, op.Cid)
-			is_duplicate = true
 		} else {
 			log.Printf("[%d] cid %d op %v to apply", sm.me, op.Cid, op)
-		}
-		switch op.Type {
-		case kJoin:
-		case kLeave:
-		case kMove:
-		case kQuery:
-		}
-		if cid, ok := latest_cids[op.Cid>>32]; !ok {
-			latest_cids[op.Cid>>32] = op.Cid
-		} else if cid < op.Cid {
-			delete(sm.staged, cid)
-			latest_cids[op.Cid>>32] = op.Cid
+			switch op.Type {
+			case kJoin:
+				applyJoining(op.JoiningServers)
+			case kLeave:
+				applyLeaving(op.LeavingGroups)
+			case kMove:
+				applyMoving(op.MovingShard, op.MovingGroup)
+			}
+			latest_cids[clerkID] = op.Cid
+			if ok {
+				delete(sm.staged, cid)
+			}
 		}
 	}
+	log.Printf("[%d] load complete, #configs %d #logs %d", sm.me, nkeys_new, nlogs_new)
 	go sm.Run(latest_cids)
 
 	return sm
@@ -215,42 +291,47 @@ func (sm *ShardMaster) Run(latest_cids map[uint64]uint64) {
 			if !ok {
 				log.Fatalf("[%d] ShardMaster.Run() invalid command msg from applyCh %v", sm.me, msg)
 			}
-			is_duplicate := false
-			if cid, ok := latest_cids[op.Cid>>32]; ok && op.Cid <= cid {
+			clerkID := op.Cid >> 32
+			if cid, ok := latest_cids[clerkID]; ok && op.Cid <= cid {
 				log.Printf("[%d] Cid %d present in dedup", sm.me, op.Cid)
-				is_duplicate = true
 			} else {
 				log.Printf("[%d] Cid %d op %v to apply", sm.me, op.Cid, op)
-			}
-			sm.mu.Lock()
-			switch op.Type {
-			case kQuery:
-				if op.QueryConfig >= 0 && op.QueryConfig < len(sm.configs) {
-					sm.staged[op.Cid] = QueryReply{WrongLeader: false, Err: OK, Config: sm.configs[op.QueryConfig]}
-				} else {
-					sm.staged[op.Cid] = QueryReply{WrongLeader: false, Err: OK, Config: sm.configs[len(sm.configs)-1]}
+				sm.mu.Lock()
+				switch op.Type {
+				case kQuery:
+					if op.QueryConfig >= 0 && op.QueryConfig < len(sm.configs) {
+						sm.staged[op.Cid] = QueryReply{WrongLeader: false, Err: OK, Config: sm.configs[op.QueryConfig]}
+					} else {
+						sm.staged[op.Cid] = QueryReply{WrongLeader: false, Err: OK, Config: sm.configs[len(sm.configs)-1]}
+					}
+				case kJoin:
+					applyJoining(op.JoiningServers)
+					sm.staged[op.Cid] = JoinReply{WrongLeader: false, Err: OK}
+				case kLeave:
+					applyLeaving(op.LeavingGroups)
+					sm.staged[op.Cid] = LeaveReply{WrongLeader: false, Err: OK}
+				case kMove:
+					applyMoving(op.MovingShard, op.MovingGroup)
+					sm.staged[op.Cid] = MoveReply{WrongLeader: false, Err: OK}
 				}
-			}
-			if sm.pendings[op.Cid] {
-				delete(sm.pendings, op.Cid)
+				latest_cids[clerkID] = op.Cid // update clerkID with latest cid
+				if ok {
+					delete(sm.staged, cid) // garbage collect stale cid
+				}
 				sm.cv.Broadcast()
-			} else if sm.leading {
-				log.Printf("[%d] WARN Cid %d absent in pendings", sm.me, op.Cid)
+				//if _, ok := sm.pendings[op.Cid]; ok {
+				//	delete(sm.pendings, op.Cid)
+				//} else if sm.leading {
+				//	log.Printf("[%d] WARN Cid %d absent in pendings", sm.me, op.Cid)
+				//}
+				sm.mu.Unlock()
 			}
-			// assuming every client is linearizable, garbage collect dedup-table
-			if cid, ok := latest_cids[op.Cid>>32]; !ok {
-				latest_cids[op.Cid>>32] = op.Cid
-			} else if cid < op.Cid {
-				delete(sm.staged, cid)
-				latest_cids[op.Cid>>32] = op.Cid
-			}
-			sm.mu.Unlock()
 		} else if msg.CommandIndex == -2 { // to leader/follower
 			if sm.leading = msg.Command.(bool); !sm.leading {
 				log.Printf("[%d] clear pendings", sm.me)
 				sm.mu.Lock()
-				for cid, _ := range sm.pendings {
-					sm.pendings[cid] = false
+				for cid := range sm.pendings {
+					sm.pendings[cid] = false // mark false to notify cancellation
 				}
 				if len(sm.pendings) > 0 {
 					sm.cv.Broadcast()
@@ -268,9 +349,9 @@ func (sm *ShardMaster) Run(latest_cids map[uint64]uint64) {
 			buf := bytes.NewBuffer(ss)
 			dec := labgob.NewDecoder(buf)
 			if err := dec.Decode(&data_); err != nil {
-				log.Fatalf("[%d] ShardMaster.Run() decode configs from snapshot error! %s", sm.me, err.Error())
+				log.Fatalf("[%d] Run() decode state from snapshot error! %s", sm.me, err.Error())
 			} else if err := dec.Decode(&latest_cids_); err != nil {
-				log.Fatalf("[%d] ShardMaster.Run() decode dedup-table from snapshot error! %s", sm.me, err.Error())
+				log.Fatalf("[%d] Run() decode dedup-table from snapshot error! %s", sm.me, err.Error())
 			}
 			latest_cids = latest_cids_
 			nkeys_new := len(data_)
@@ -280,7 +361,46 @@ func (sm *ShardMaster) Run(latest_cids map[uint64]uint64) {
 			sm.configs = data_
 			sm.mu.Unlock()
 
-			log.Printf("[%d] install snapshot complete, #keys %d => %d", sm.me, nkeys_old, nkeys_new)
+			log.Printf("[%d] install snapshot complete, #configs %d => %d", sm.me, nkeys_old, nkeys_new)
 		}
 	}
+}
+
+func (sm *ShardMaster) applyJoining(joining map[int][]string) {
+	// TODO deal with initial GID zero
+	for range joining {
+	}
+}
+func (sm *ShardMaster) applyLeaving(groups []int) {
+	config := &sm.configs[len(sm.configs)-1]
+	new_conf := *config
+	new_conf.Num = config.Num + 1
+	todo_shards := make([]int)
+	for _, i := range groups {
+		if _, ok := new_conf.Groups[i]; ok {
+			delete(new_conf.Groups, i)
+			for shard, gid := range new_conf.Shards {
+				if gid == i {
+					todo_shards = append(todo_shards, shard)
+					break
+				}
+			}
+		}
+	}
+	vec := new_conf.SortedGIDs()
+	var idx int
+	for _, shard := range todo_shards {
+		gid := vec[idx]
+		new_conf.Shards[shard] = gid
+		idx = (idx + 1) % len(vec)
+	}
+	sm.confings = append(sm.configs, new_conf)
+}
+
+func (sm *ShardMaster) applyMoving(shard int, group int) {
+	config := &sm.configs[len(sm.configs)-1]
+	new_conf := *config
+	new_conf.Num = config.Num + 1
+	new_conf.Shards[shard] = group
+	sm.confings = append(sm.configs, new_conf)
 }
